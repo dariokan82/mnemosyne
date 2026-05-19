@@ -2662,12 +2662,39 @@ class BeamMemory:
             # Extract context words before the metric to build a specific key.
             # "dashboard API response time of 250ms" → "response_time_ms"
             pre_text = content[max(0, m.start()-50):m.start()]
-            ctx_words = [w.strip('.,:;!?()[]"\'') for w in pre_text.split()
-                         if len(w.strip('.,:;!?()[]"\'')) > 2
-                         and w.lower() not in ('the', 'and', 'for', 'was', 'of', 'to', 'a', 'an', 'in', 'on', 'at', 'by', 'is', 'are')][-3:]
+            # Strip markdown, backticks, and code formatting from pre_text
+            _clean_pre = _re.sub(r'`[^`]*`', ' ', pre_text)  # inline code
+            _clean_pre = _re.sub(r'\*\*[^*]+\*\*', ' ', _clean_pre)  # bold
+            _clean_pre = _re.sub(r'[*_]{1,2}[^*_\n]+[*_]{1,2}', ' ', _clean_pre)  # italic/bold
+            _clean_pre = _re.sub(r'[=<>|&]', ' ', _clean_pre)  # code operators
+            ctx_words = [w.strip('.,:;!?()[]"\'`*_') for w in _clean_pre.split()
+                         if len(w.strip('.,:;!?()[]"\'`*_')) > 2
+                         and w.lower() not in ('the', 'and', 'for', 'was', 'of', 'to', 'a', 'an', 'in', 'on', 'at', 'by', 'is', 'are', 'has', 'had', 'not', 'but', 'or')
+                         and not _re.search(r'^(pt-|lg:|pr-|pl-|pb-|px-|py-|mt-|mr-|mb-|ml-|mx-|my-)', w)  # CSS utility classes
+                         and not _re.search(r'^[`*\]]', w)  # stray markdown leftovers
+                         ][-3:]
             prefix = '_'.join(w.lower() for w in ctx_words) if ctx_words else ''
             key = f"{prefix}_{unit_clean}" if prefix else unit_clean
+            # Quality gate: reject garbage keys
+            if '`' in key or '**' in key or key.count('**') > 0:
+                continue
+            if _re.search(r'[*_]{2,}', key):  # stray markdown emphasis
+                continue
+            # Reject keys that look like code (contain >2 special chars)
+            if len(_re.findall(r'[`=<>|]', key)) > 2:
+                continue
+            # Reject % metrics in code-heavy contexts (more special chars than words)
+            if unit_clean == '%':
+                _nonalpha = len(_re.findall(r'[^a-zA-Z0-9\s]', _clean_pre))
+                _words = len(_clean_pre.split())
+                if _words > 0 and _nonalpha / _words > 0.6:
+                    continue
             val = f"{num}{unit}"
+            # Clean % suffix: use _pct instead of _% for readability
+            if unit_clean == '%':
+                key = key.replace('_%', '_pct')
+                if not key.endswith('_pct'):
+                    key = f"{prefix}_pct" if prefix else 'pct'
             self._insert_fact(session, message_idx, 'metric', key, val,
                               self._context_snippet(content, m.start()), 0.65)
             counts["metric"] += 1
@@ -2692,7 +2719,8 @@ class BeamMemory:
             self._insert_fact(session, message_idx, 'date', 'named_date', dt, ctx, 0.7)
             counts["date"] += 1
 
-        # Version strings
+        # Version strings — two patterns:
+        # Pattern A: "PostgreSQL v14.2", "Docker 27.1.1" (name directly before version)
         for m in _re.finditer(r'([A-Z][a-zA-Z]+(?:\s*[A-Z][a-zA-Z]+)*)\s+v?(\d+\.\d+(?:\.\d+)?)', content):
             name = m.group(1).strip()
             ver = m.group(2)
@@ -2700,6 +2728,20 @@ class BeamMemory:
             self._insert_fact(session, message_idx, 'version', key, ver,
                               self._context_snippet(content, m.start()), 0.7)
             counts["version"] += 1
+        # Pattern B: "PostgreSQL version 14.2", "Python version 3.11" (explicit 'version' word)
+        _seen_versions = set()  # dedup across patterns
+        for m in _re.finditer(r'([A-Z][a-zA-Z]+)\s+version\s+v?(\d+\.\d+(?:\.\d+)?)', content, _re.IGNORECASE):
+            name = m.group(1).strip()
+            ver = m.group(2)
+            # Skip common verbs/prefixes that get caught as name prefixes
+            if name.lower() in ('running', 'using', 'installed', 'upgraded', 'currently'):
+                continue
+            key = f"{name.lower().replace(' ', '_')}_version"
+            if ver not in _seen_versions:
+                _seen_versions.add(ver)
+                self._insert_fact(session, message_idx, 'version', key, ver,
+                                  self._context_snippet(content, m.start()), 0.7)
+                counts["version"] += 1
 
         # Negations (critical for CR)
         for m in _re.finditer(
