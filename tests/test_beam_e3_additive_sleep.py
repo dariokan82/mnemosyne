@@ -58,7 +58,7 @@ def _consolidated_rows(db_path, session_id):
         conn.close()
 
 
-def _seed_old_wm(db_path, session_id, n, ts_offset_hours=20):
+def _seed_old_wm(db_path, session_id, n, ts_offset_hours=200):
     """Insert n old working_memory rows for the given session. Uses
     distinct content per row so each is uniquely identifiable."""
     conn = sqlite3.connect(str(db_path))
