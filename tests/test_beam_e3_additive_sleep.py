@@ -176,7 +176,7 @@ class TestE3AdditiveSleep:
         # Distinctive token only in the original, very unlikely to
         # appear in an aaak-encoded summary.
         conn = sqlite3.connect(str(temp_db))
-        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        old_ts = (datetime.now() - timedelta(hours=200)).isoformat()
         conn.execute(
             "INSERT INTO working_memory (id, content, source, timestamp, session_id) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -247,7 +247,7 @@ class TestE3AdditiveSleep:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        old_ts = (datetime.now() - timedelta(hours=200)).isoformat()
         legacy_conn.execute(
             "INSERT INTO working_memory (id, content, source, timestamp, session_id) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -401,7 +401,7 @@ class TestE3AdditiveSleep:
         # Insert and consolidate.
         mem_id = beam.remember(content, source="conversation")
         conn = sqlite3.connect(str(temp_db))
-        old_ts = (datetime.now() - timedelta(hours=20)).isoformat()
+        old_ts = (datetime.now() - timedelta(hours=200)).isoformat()
         conn.execute(
             "UPDATE working_memory SET timestamp = ? WHERE id = ?",
             (old_ts, mem_id),
