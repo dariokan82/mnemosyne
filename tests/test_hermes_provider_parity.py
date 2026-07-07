@@ -300,18 +300,51 @@ def test_provider_persona_prompt_injection_matches(tmp_path, provider_modules):
 
 
 def test_provider_persona_prompt_silent_when_disabled_or_missing(tmp_path, provider_modules):
+    persona_file = tmp_path / "persona.md"
+    persona_file.write_text("# Persona\n\n- should stay hidden when disabled\n")
     missing_file = tmp_path / "missing-persona.md"
 
     for module in provider_modules.values():
         provider = _prompt_provider(module)
         provider.PERSONA_ENABLED = False
-        provider.PERSONA_FILE = missing_file
-        assert "# L3 Persona" not in provider.system_prompt_block()
+        provider.PERSONA_FILE = persona_file
+        block = provider.system_prompt_block()
+        assert "# L3 Persona" not in block
+        assert "should stay hidden when disabled" not in block
 
         provider = _prompt_provider(module)
         provider.PERSONA_ENABLED = True
         provider.PERSONA_FILE = missing_file
         assert "# L3 Persona" not in provider.system_prompt_block()
+
+
+def test_provider_persona_negative_token_cap_does_not_slice_from_end(tmp_path, provider_modules):
+    persona_file = tmp_path / "persona.md"
+    persona_file.write_text("# Persona\n\n## privacy\n- secret tail should not leak\n")
+
+    for module in provider_modules.values():
+        provider = _prompt_provider(module)
+        provider.PERSONA_ENABLED = True
+        provider.PERSONA_FILE = persona_file
+        provider.PERSONA_TOKEN_CAP = -10
+        block = provider.system_prompt_block()
+        assert "secret tail should not leak" not in block
+        assert "truncated" in block
+
+
+@pytest.mark.parametrize("bad_token_cap", ["", "not-an-int"])
+def test_provider_persona_token_cap_invalid_env_falls_back(monkeypatch, bad_token_cap):
+    monkeypatch.setenv("MNEMOSYNE_PERSONA_TOKEN_CAP", bad_token_cap)
+
+    modules = {
+        "hermes_memory_provider": _import_module("hermes_memory_provider", PROJECT_ROOT),
+        "mnemosyne_hermes": _import_module("mnemosyne_hermes", INTEGRATION_SRC),
+    }
+
+    assert {name: module.MnemosyneMemoryProvider.PERSONA_TOKEN_CAP for name, module in modules.items()} == {
+        "hermes_memory_provider": 1500,
+        "mnemosyne_hermes": 1500,
+    }
 
 
 def _save_mnemosyne_modules():
