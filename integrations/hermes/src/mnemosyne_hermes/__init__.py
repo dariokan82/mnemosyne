@@ -27,6 +27,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from datetime import datetime, timedelta
 
+from .tools import ALL_TOOL_SCHEMAS
+from mnemosyne.batch_tool import (
+    BatchValidationError,
+    apply_beam_batch,
+    batch_validation_error_payload,
+    dry_run_batch,
+    validate_batch_operations,
+)
+from mnemosyne.hermes_config import read_hermes_config_key
 # Mnemosyne core is installed via pip (mnemosyne-memory>=3.11.1 dependency),
 # but keep imports lazy so installer/status CLI commands still work in broken
 # or partially-installed environments.
@@ -370,10 +379,6 @@ def _sync_turn_assistant_limit() -> int:
 
 
 # ---------------------------------------------------------------------------
-from .tools import ALL_TOOL_SCHEMAS
-
-
-# ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
@@ -488,7 +493,7 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
             "in_flight": 0,
         }
         self._auto_sleep_threshold = 50
-        self._auto_sleep_enabled = os.environ.get("MNEMOSYNE_AUTO_SLEEP_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+        self._auto_sleep_enabled = _parse_env_bool("MNEMOSYNE_AUTO_SLEEP_ENABLED", True)
         # Reflection/sleep guardrails. "Reflection" maps to Mnemosyne's
         # sleep/consolidation path in the Hermes provider. Cron skipping is
         # default-on per issue #337; max_calls_per_session defaults to 3 and
@@ -618,16 +623,14 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
 
         Precedence: kwargs > config.yaml > env var > hardcoded defaults.
         """
-        # auto_sleep: prefer kwargs, then config.yaml, then env var
+        # auto_sleep: prefer kwargs, then config.yaml, then env var, defaulting
+        # on to match Mnemosyne core's consolidation behavior for fresh installs.
         auto_sleep = kwargs.get("auto_sleep")
         if auto_sleep is None:
             auto_sleep = self._read_config_key("auto_sleep")
         if auto_sleep is not None:
-            if isinstance(auto_sleep, str):
-                self._auto_sleep_enabled = auto_sleep.lower() in ("true", "1", "yes", "on")
-            else:
-                self._auto_sleep_enabled = bool(auto_sleep)
-        # env var is already applied in __init__, so it is the base default
+            self._auto_sleep_enabled = _coerce_bool(auto_sleep, self._auto_sleep_enabled)
+        # env var/default is already applied in __init__, so it is the base default
 
         # sleep_threshold: prefer kwargs, then config.yaml, then default 50
         sleep_threshold = kwargs.get("sleep_threshold")
@@ -758,16 +761,7 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
 
     def _read_config_key(self, key: str) -> Any:
         """Read a single key from memory.mnemosyne in config.yaml."""
-        try:
-            import yaml, os
-            config_path = os.path.join(self._hermes_home, "config.yaml") if self._hermes_home else ""
-            if not config_path or not os.path.exists(config_path):
-                return None
-            with open(config_path, "r") as f:
-                config = yaml.safe_load(f) or {}
-            return config.get("memory", {}).get("mnemosyne", {}).get(key)
-        except Exception:
-            return None
+        return read_hermes_config_key(getattr(self, "_hermes_home", None), key)
 
 
     def _configured_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -830,7 +824,7 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"key": "auto_sleep", "description": "Auto-run sleep() when working memory exceeds threshold. Set true to enable. Backward-compatible with MNEMOSYNE_AUTO_SLEEP_ENABLED env var.", "default": False},
+            {"key": "auto_sleep", "description": "Auto-run sleep() when working memory exceeds threshold. Set false to disable. Backward-compatible with MNEMOSYNE_AUTO_SLEEP_ENABLED env var.", "default": True},
             {"key": "sleep_threshold", "description": "Working memory count before auto-sleep triggers", "default": 50},
             {"key": "reflect", "description": "Reflection/sleep guardrails. Supports disabled_for_cron (default true) and max_calls_per_session (default 3; negative disables cap). Env: MNEMOSYNE_REFLECT_DISABLED_FOR_CRON, MNEMOSYNE_REFLECT_MAX_CALLS_PER_SESSION.", "default": {"disabled_for_cron": True, "max_calls_per_session": 3}},
             {"key": "vector_type", "description": "Vector storage type (note: not yet wired to BeamMemory at runtime; reserved for future use)", "choices": ["float32", "int8", "bit"], "default": "int8"},
@@ -854,6 +848,7 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
             with open(config_path, "r") as f:
                 config = yaml.safe_load(f) or {}
             memory_cfg = config.setdefault("memory", {}).setdefault("mnemosyne", {})
+            memory_cfg.setdefault("auto_sleep", _parse_env_bool("MNEMOSYNE_AUTO_SLEEP_ENABLED", True))
             memory_cfg.update(values)
             with open(config_path, "w") as f:
                 yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
@@ -1371,6 +1366,8 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
         try:
             if tool_name == "mnemosyne_remember":
                 return self._handle_remember(args)
+            elif tool_name == "mnemosyne_batch":
+                return self._handle_batch(args)
             elif tool_name == "mnemosyne_recall":
                 return self._handle_recall(args)
             elif tool_name == "mnemosyne_shared_remember":
@@ -1473,13 +1470,10 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
         source = args.get("source", "user")
         extract = bool(args.get("extract", False))
         extract_entities = bool(args.get("extract_entities", False))
-        # When extract=true and scope is not explicitly passed by the caller,
-        # auto-default to global. Facts extracted via LLM are identity-significant
-        # and should survive session boundaries. When extract=false, fall back
-        # to the configured default_scope (user-configurable via default_scope
-        # in config.yaml). If the caller explicitly passed scope, respect that
-        # choice.
-        scope = args.get("scope", "global" if extract else self._default_scope)
+        # Use the configured default scope unless the caller explicitly passes
+        # a scope. This matches the root Hermes provider and keeps
+        # mnemosyne_remember / mnemosyne_batch scope behavior in parity.
+        scope = args.get("scope", self._default_scope)
         valid_until = args.get("valid_until", None) or None
         metadata = args.get("metadata") or None
         # Trust-boundary clamp — see VERACITY_ALLOWED in
@@ -1513,6 +1507,25 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
             "metadata": metadata,
             "veracity": veracity,
         })
+
+    def _handle_batch(self, args: Dict[str, Any]) -> str:
+        try:
+            normalized = validate_batch_operations(args.get("operations"))
+        except BatchValidationError as exc:
+            return json.dumps(batch_validation_error_payload(exc))
+
+        if bool(args.get("dry_run", False)):
+            return json.dumps(dry_run_batch(normalized))
+
+        return json.dumps(apply_beam_batch(
+            self._beam,
+            normalized,
+            default_scope=self._default_scope,
+            remember_source_default="user",
+            remember_source_tool="mnemosyne_batch",
+            audit_event=self._audit_event,
+            extract_defaults_global=False,
+        ))
 
     def _handle_recall(self, args: Dict[str, Any]) -> str:
         query = args.get("query", "")

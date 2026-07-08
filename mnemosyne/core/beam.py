@@ -406,17 +406,31 @@ _warn_about_veracity_weight_overrides()
 _CROSS_SESSION = os.environ.get("MNEMOSYNE_CROSS_SESSION", "0") == "1"
 
 
+def _cross_session_enabled() -> bool:
+    """Return whether session scoping should be disabled for recall."""
+    return _CROSS_SESSION or os.environ.get("MNEMOSYNE_CROSS_SESSION", "0") == "1"
+
+
 def _session_scope_filter(extra_col: str = "") -> str:
     """Return a WHERE clause for session scoping.
 
-    When _CROSS_SESSION is enabled, returns (1=1) to disable filtering.
+    When cross-session recall is enabled, returns (1=1) to disable filtering.
     Otherwise returns (session_id = ? OR scope = 'global'[ OR col = ?]).
     """
-    if _CROSS_SESSION:
+    if _cross_session_enabled():
         return "(1=1)"
     if extra_col:
         return f"(session_id = ? OR scope = 'global' OR {extra_col} = ?)"
     return "(session_id = ? OR scope = 'global')"
+
+
+def _session_scope_params(session_id: str, extra_value=None) -> list:
+    """Return bind params matching _session_scope_filter()."""
+    if _cross_session_enabled():
+        return []
+    if extra_value is not None:
+        return [session_id, extra_value]
+    return [session_id]
 
 # Vector compression: float32 | int8 | bit
 VEC_TYPE = os.environ.get("MNEMOSYNE_VEC_TYPE", "int8").lower()
@@ -454,7 +468,14 @@ def _get_connection(db_path: Path = None) -> sqlite3.Connection:
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        # Configurable so deployments with long consolidation write windows
+        # can let tool calls ride them out instead of failing with
+        # "database is locked" after a hardcoded 5s.
+        try:
+            _busy_ms = int(os.environ.get("MNEMOSYNE_BUSY_TIMEOUT_MS", "5000"))
+        except ValueError:
+            _busy_ms = 5000
+        conn.execute(f"PRAGMA busy_timeout={_busy_ms}")
         if _SQLITE_VEC_AVAILABLE:
             try:
                 conn.enable_load_extension(True)
@@ -3699,7 +3720,14 @@ class BeamMemory:
         # each branch instead of scanning working_memory and building a temp
         # B-tree for the CASE-based ORDER BY.
         select_cols = "id, content, source, timestamp, importance, scope, last_recalled"
-        common_predicate = "(valid_until IS NULL OR valid_until > ?) AND superseded_by IS NULL"
+        include_consolidated = _env_truthy("MNEMOSYNE_CONTEXT_INCLUDE_CONSOLIDATED")
+        predicates = [
+            "(valid_until IS NULL OR valid_until > ?)",
+            "superseded_by IS NULL",
+        ]
+        if not include_consolidated:
+            predicates.append("consolidated_at IS NULL")
+        common_predicate = " AND ".join(predicates)
 
         cursor.execute(f"""
             SELECT {select_cols}
@@ -4148,6 +4176,24 @@ class BeamMemory:
         # Strip closed <think>...</think> blocks that some LLMs emit
         import re as _re
         summary = _re.sub(r"<think>.*?</think>", "", summary, flags=_re.DOTALL).strip()
+        # Compute the embedding BEFORE the INSERT opens the write transaction.
+        # embed() can be a network call (API embeddings, 30s timeout) or a
+        # heavy CPU call; running it after the INSERT held the SQLite write
+        # lock across the whole call, starving every other connection
+        # (busy_timeout default 5s) for the duration of sleep().
+        # An embed failure must not abort the insert: the summary row is the
+        # payload, the vector is an index. Fall back to vec = None like the
+        # other embed call sites (remember, remember_batch, update_working).
+        vec = None
+        if _embeddings.available():
+            try:
+                vec = _embeddings.embed([summary])
+            except Exception as exc:
+                logger.warning(
+                    "consolidate_to_episodic: embedding failed, storing "
+                    "summary without vector (%s): %s",
+                    type(exc).__name__, exc,
+                )
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO episodic_memory
@@ -4159,34 +4205,32 @@ class BeamMemory:
               self.author_id, self.author_type, self.channel_id, ep_type, row_veracity))
         rowid = cursor.lastrowid
 
-        if _embeddings.available():
-            vec = _embeddings.embed([summary])
-            if vec is not None:
-                if _vec_available(self.conn):
-                    try:
-                        _vec_insert(self.conn, rowid, np.asarray(vec[0]).tolist())
-                    except Exception as _vec_exc:
-                        logger.warning(
-                            "vec_episodes insert failed (rowid=%s): %s",
-                            rowid, _vec_exc,
-                        )
-                else:
-                    # Fallback: store in memory_embeddings table for in-memory search
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model)
-                        VALUES (?, ?, ?)
-                    """, (memory_id, _embeddings.serialize(np.asarray(vec[0])), _embeddings._DEFAULT_MODEL))
+        if vec is not None:
+            if _vec_available(self.conn):
+                try:
+                    _vec_insert(self.conn, rowid, np.asarray(vec[0]).tolist())
+                except Exception as _vec_exc:
+                    logger.warning(
+                        "vec_episodes insert failed (rowid=%s): %s",
+                        rowid, _vec_exc,
+                    )
+            else:
+                # Fallback: store in memory_embeddings table for in-memory search
+                cursor.execute("""
+                    INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model)
+                    VALUES (?, ?, ?)
+                """, (memory_id, _embeddings.serialize(np.asarray(vec[0])), _embeddings._DEFAULT_MODEL))
 
-                # Binary vector compression (Phase 2 -- 32x reduction)
-                if _mib is not None:
-                    try:
-                        bv = _mib(np.asarray(vec[0]))
-                        cursor.execute(
-                            "UPDATE episodic_memory SET binary_vector = ? WHERE rowid = ?",
-                            (bv, rowid)
-                        )
-                    except Exception:
-                        pass  # Non-blocking
+            # Binary vector compression (Phase 2 -- 32x reduction)
+            if _mib is not None:
+                try:
+                    bv = _mib(np.asarray(vec[0]))
+                    cursor.execute(
+                        "UPDATE episodic_memory SET binary_vector = ? WHERE rowid = ?",
+                        (bv, rowid)
+                    )
+                except Exception:
+                    pass  # Non-blocking
 
         self.conn.commit()
 
@@ -5397,12 +5441,12 @@ class BeamMemory:
         # Author-only searches have no session/channel restriction.
         if channel_id:
             wm_where_clauses.append(_session_scope_filter("channel_id"))
-            wm_params.extend([self.session_id, channel_id])
+            wm_params.extend(_session_scope_params(self.session_id, channel_id))
         elif author_id or author_type:
             wm_where_clauses.append("(1=1)")
         else:
             wm_where_clauses.append(_session_scope_filter())
-            wm_params.append(self.session_id)
+            wm_params.extend(_session_scope_params(self.session_id))
         
         if from_date:
             wm_where_clauses.append("timestamp >= ?")
@@ -5655,13 +5699,13 @@ class BeamMemory:
             em_placeholders = ",".join("?" * len(entity_memory_ids))
             if channel_id:
                 em_entity_scope = _session_scope_filter("channel_id")
-                em_entity_params = [*tuple(entity_memory_ids), self.session_id, channel_id]
+                em_entity_params = [*tuple(entity_memory_ids), *_session_scope_params(self.session_id, channel_id)]
             elif author_id or author_type:
                 em_entity_scope = "(1=1)"
                 em_entity_params = [*tuple(entity_memory_ids)]
             else:
                 em_entity_scope = _session_scope_filter()
-                em_entity_params = [*tuple(entity_memory_ids), self.session_id]
+                em_entity_params = [*tuple(entity_memory_ids), *_session_scope_params(self.session_id)]
             em_entity_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
                 SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
@@ -5777,13 +5821,13 @@ class BeamMemory:
             # Also check episodic memory for fact matches
             if channel_id:
                 fact_em_scope = _session_scope_filter("channel_id")
-                fact_em_params = [*tuple(fact_memory_ids), self.session_id, channel_id]
+                fact_em_params = [*tuple(fact_memory_ids), *_session_scope_params(self.session_id, channel_id)]
             elif author_id or author_type:
                 fact_em_scope = "(1=1)"
                 fact_em_params = [*tuple(fact_memory_ids)]
             else:
                 fact_em_scope = _session_scope_filter()
-                fact_em_params = [*tuple(fact_memory_ids), self.session_id]
+                fact_em_params = [*tuple(fact_memory_ids), *_session_scope_params(self.session_id)]
             fact_em_params.extend([datetime.now().isoformat()])
             cursor.execute(f"""
                 SELECT id, content, source, timestamp, importance, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, veracity, memory_type
@@ -5900,12 +5944,12 @@ class BeamMemory:
         # Author-only searches have no session/channel restriction.
         if channel_id:
             em_where_clauses.append(_session_scope_filter("channel_id"))
-            em_params.extend([self.session_id, channel_id])
+            em_params.extend(_session_scope_params(self.session_id, channel_id))
         elif author_id or author_type:
             em_where_clauses.append("(1=1)")
         else:
             em_where_clauses.append(_session_scope_filter())
-            em_params.append(self.session_id)
+            em_params.extend(_session_scope_params(self.session_id))
         
         if from_date:
             em_where_clauses.append("timestamp >= ?")
@@ -6351,9 +6395,9 @@ class BeamMemory:
             placeholders = ",".join("?" * len(wm_ids))
             rec_params = [now_iso, *tuple(wm_ids)]
             if channel_id:
-                rec_params.extend([self.session_id, channel_id])
+                rec_params.extend(_session_scope_params(self.session_id, channel_id))
             elif not (author_id or author_type):
-                rec_params.append(self.session_id)
+                rec_params.extend(_session_scope_params(self.session_id))
             cursor.execute(f"""
                 UPDATE working_memory
                 SET recall_count = recall_count + 1, last_recalled = ?
@@ -6363,9 +6407,9 @@ class BeamMemory:
             placeholders = ",".join("?" * len(em_ids))
             rec_params = [now_iso, *tuple(em_ids)]
             if channel_id:
-                rec_params.extend([self.session_id, channel_id])
+                rec_params.extend(_session_scope_params(self.session_id, channel_id))
             elif not (author_id or author_type):
-                rec_params.append(self.session_id)
+                rec_params.extend(_session_scope_params(self.session_id))
             cursor.execute(f"""
                 UPDATE episodic_memory
                 SET recall_count = recall_count + 1, last_recalled = ?
@@ -6954,10 +6998,10 @@ class BeamMemory:
 
         def _rec_scope_params() -> List:
             if channel_id:
-                return [self.session_id, channel_id]
+                return _session_scope_params(self.session_id, channel_id)
             if author_id or author_type:
                 return []
-            return [self.session_id]
+            return _session_scope_params(self.session_id)
 
         # Update recall_count / last_recalled for engine results too --
         # the linear path updates them and downstream features (decay
@@ -7042,7 +7086,7 @@ class BeamMemory:
         Conditional filters: caller-supplied kwargs.
         """
         # Session scope filter (honors MNEMOSYNE_CROSS_SESSION).
-        if not _CROSS_SESSION:
+        if not _cross_session_enabled():
             row_session = row_dict.get("session_id") if "session_id" in row_dict else None
             row_scope = row_dict.get("scope") or "session"
             if row_scope != "global" and row_session is not None and row_session != self.session_id:
@@ -8112,6 +8156,15 @@ class BeamMemory:
                     f"WHERE id IN ({group_placeholders})",
                     tuple(ids),
                 )
+                # Commit the claim-clear NOW. Leaving this UPDATE uncommitted
+                # opened an implicit write transaction that stayed open across
+                # the NEXT group's LLM calls (validate_conflict_pair /
+                # summarize_memories — remote API seconds-to-minutes, local
+                # GGUF fallback unbounded), holding the SQLite write lock the
+                # whole time and failing every concurrent tool call with
+                # "database is locked". Observed wedging a live instance for
+                # 7+ hours with a frozen 52MB WAL.
+                self.conn.commit()
             consolidated_ids.extend(ids)
             summaries_created += 1
 

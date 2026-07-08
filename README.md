@@ -319,6 +319,7 @@ When client-side encryption is enabled, the remote sync server sees **only metad
 | `MNEMOSYNE_IMPORTANCE_WEIGHT` | `0.2` | Importance weight |
 | `MNEMOSYNE_WM_MAX_ITEMS` | `10000` | Working memory limit |
 | `MNEMOSYNE_RECENCY_HALFLIFE` | `168` | Decay halflife in hours |
+| `MNEMOSYNE_CONTEXT_INCLUDE_CONSOLIDATED` | *(unset)* | Include consolidated working-memory rows in `get_context()` prompt injection. Default: excluded. Truthy values: `1`, `true`, `yes`, `on`. Does not affect `recall()`. |
 
 | `MNEMOSYNE_EMBEDDING_API_URL` | `${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}` | Preferred name for custom embedding API endpoint (OpenAI-compatible). Falls back to `OPENROUTER_BASE_URL`. |
 | `MNEMOSYNE_EMBEDDING_API_KEY` | `${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}}` | Preferred name for embedding API key. Falls back to `OPENROUTER_API_KEY`, then `OPENAI_API_KEY`. |
@@ -364,7 +365,12 @@ When used with Hermes Agent, Mnemosyne exposes **23 tools** for full memory life
 
 **Install (Hermes users):**
 ```bash
-pip install mnemosyne-hermes
+source ~/.hermes/hermes-agent/venv/bin/activate
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip
+python -m pip install mnemosyne-hermes
+mkdir -p ~/.hermes/plugins/mnemosyne
+ln -sfn "$(~/.hermes/hermes-agent/venv/bin/python -c 'import pathlib, mnemosyne_hermes; print(pathlib.Path(mnemosyne_hermes.__file__).resolve().parent)')"/* ~/.hermes/plugins/mnemosyne/
 hermes config set memory.provider mnemosyne
 hermes memory setup
 ```
