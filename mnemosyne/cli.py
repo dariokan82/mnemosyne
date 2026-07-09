@@ -42,6 +42,17 @@ def _usage(message: str, exit_code: int = 2) -> NoReturn:
     raise SystemExit(exit_code)
 
 
+def _require_value(rest, i, flag, parser):
+    """Extract a value for a CLI flag at position i. Returns (parsed_value, i+2).
+
+    Raises SystemExit if the flag is at the end of the argument list (missing
+    value). Used by hygiene audit/status/restore parsers.
+    """
+    if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+        _fail(f"{flag} requires a value")
+    return parser(rest[i + 1], flag.lstrip("-")), i + 2
+
+
 def _parse_float(value: str, name: str) -> float:
     """Parse a float argument or exit with a user-facing CLI error."""
     try:
@@ -732,9 +743,6 @@ def cmd_hygiene(args):
     sub = args[0]
     rest = args[1:]
 
-    def _has_option_value(index: int) -> bool:
-        return index + 1 < len(rest) and not rest[index + 1].startswith("--")
-
     if sub == "audit":
         limit = 200
         min_score = 0.3
@@ -744,26 +752,20 @@ def cmd_hygiene(args):
         as_json = False
         i = 0
         while i < len(rest):
-            if rest[i] == "--limit" and _has_option_value(i):
-                limit = _parse_int(rest[i + 1], "limit")
-                i += 2
-            elif rest[i] == "--offset" and _has_option_value(i):
-                offset = _parse_int(rest[i + 1], "offset")
-                i += 2
-            elif rest[i] == "--batch-size" and _has_option_value(i):
-                batch_size = _parse_int(rest[i + 1], "batch-size")
-                i += 2
+            if rest[i] == "--limit":
+                limit, i = _require_value(rest, i, "--limit", _parse_int)
+            elif rest[i] == "--offset":
+                offset, i = _require_value(rest, i, "--offset", _parse_int)
+            elif rest[i] == "--batch-size":
+                batch_size, i = _require_value(rest, i, "--batch-size", _parse_int)
+            elif rest[i] == "--min-score":
+                min_score, i = _require_value(rest, i, "--min-score", _parse_float)
             elif rest[i] == "--all":
                 scan_all = True
                 i += 1
-            elif rest[i] == "--min-score" and _has_option_value(i):
-                min_score = _parse_float(rest[i + 1], "min-score")
-                i += 2
             elif rest[i] == "--json":
                 as_json = True
                 i += 1
-            elif rest[i] in ("--limit", "--offset", "--batch-size", "--min-score"):
-                _fail(f"{rest[i]} requires a value")
             else:
                 _fail(f"Unknown hygiene audit option: {rest[i]}")
 
@@ -811,11 +813,8 @@ def cmd_hygiene(args):
             if rest[i] == "--json":
                 as_json = True
                 i += 1
-            elif rest[i] == "--limit" and _has_option_value(i):
-                limit = _parse_int(rest[i + 1], "limit")
-                i += 2
             elif rest[i] == "--limit":
-                _fail("--limit requires a value")
+                limit, i = _require_value(rest, i, "--limit", _parse_int)
             else:
                 _fail(f"Unknown hygiene status option: {rest[i]}")
         db_path = Path(DATA_DIR) / "mnemosyne.db"
@@ -917,11 +916,8 @@ def cmd_hygiene(args):
         restore_limit = 100
         i = 0
         while i < len(rest):
-            if rest[i] == "--limit" and _has_option_value(i):
-                restore_limit = _parse_int(rest[i + 1], "limit")
-                i += 2
-            elif rest[i] == "--limit":
-                _fail("--limit requires a value")
+            if rest[i] == "--limit":
+                restore_limit, i = _require_value(rest, i, "--limit", _parse_int)
             else:
                 _fail(f"Unknown hygiene restore option: {rest[i]}")
 
