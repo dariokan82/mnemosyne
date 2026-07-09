@@ -247,13 +247,16 @@ class TestAuditNoise:
         ("args", "message"),
         [
             (["audit", "--limit"], "--limit requires a value"),
+            (["audit", "--limit", "--json"], "--limit requires a value"),
             (["audit", "--offset"], "--offset requires a value"),
             (["audit", "--batch-size"], "--batch-size requires a value"),
             (["audit", "--min-score"], "--min-score requires a value"),
             (["audit", "--bogus"], "Unknown hygiene audit option: --bogus"),
             (["status", "--limit"], "--limit requires a value"),
+            (["status", "--limit", "--json"], "--limit requires a value"),
             (["status", "--bogus"], "Unknown hygiene status option: --bogus"),
             (["restore", "--limit"], "--limit requires a value"),
+            (["restore", "--limit", "--dry-run"], "--limit requires a value"),
             (["restore", "--bogus"], "Unknown hygiene restore option: --bogus"),
         ],
     )

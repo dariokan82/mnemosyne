@@ -732,6 +732,9 @@ def cmd_hygiene(args):
     sub = args[0]
     rest = args[1:]
 
+    def _has_option_value(index: int) -> bool:
+        return index + 1 < len(rest) and not rest[index + 1].startswith("--")
+
     if sub == "audit":
         limit = 200
         min_score = 0.3
@@ -741,19 +744,19 @@ def cmd_hygiene(args):
         as_json = False
         i = 0
         while i < len(rest):
-            if rest[i] == "--limit" and i + 1 < len(rest):
+            if rest[i] == "--limit" and _has_option_value(i):
                 limit = _parse_int(rest[i + 1], "limit")
                 i += 2
-            elif rest[i] == "--offset" and i + 1 < len(rest):
+            elif rest[i] == "--offset" and _has_option_value(i):
                 offset = _parse_int(rest[i + 1], "offset")
                 i += 2
-            elif rest[i] == "--batch-size" and i + 1 < len(rest):
+            elif rest[i] == "--batch-size" and _has_option_value(i):
                 batch_size = _parse_int(rest[i + 1], "batch-size")
                 i += 2
             elif rest[i] == "--all":
                 scan_all = True
                 i += 1
-            elif rest[i] == "--min-score" and i + 1 < len(rest):
+            elif rest[i] == "--min-score" and _has_option_value(i):
                 min_score = _parse_float(rest[i + 1], "min-score")
                 i += 2
             elif rest[i] == "--json":
@@ -808,7 +811,7 @@ def cmd_hygiene(args):
             if rest[i] == "--json":
                 as_json = True
                 i += 1
-            elif rest[i] == "--limit" and i + 1 < len(rest):
+            elif rest[i] == "--limit" and _has_option_value(i):
                 limit = _parse_int(rest[i + 1], "limit")
                 i += 2
             elif rest[i] == "--limit":
@@ -914,7 +917,7 @@ def cmd_hygiene(args):
         restore_limit = 100
         i = 0
         while i < len(rest):
-            if rest[i] == "--limit" and i + 1 < len(rest):
+            if rest[i] == "--limit" and _has_option_value(i):
                 restore_limit = _parse_int(rest[i + 1], "limit")
                 i += 2
             elif rest[i] == "--limit":
