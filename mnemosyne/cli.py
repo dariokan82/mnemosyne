@@ -917,8 +917,10 @@ def cmd_hygiene(args):
             if rest[i] == "--limit" and i + 1 < len(rest):
                 restore_limit = _parse_int(rest[i + 1], "limit")
                 i += 2
+            elif rest[i] == "--limit":
+                _fail("--limit requires a value")
             else:
-                i += 1
+                _fail(f"Unknown hygiene restore option: {rest[i]}")
 
         db_path = Path(DATA_DIR) / "mnemosyne.db"
         if not db_path.exists():

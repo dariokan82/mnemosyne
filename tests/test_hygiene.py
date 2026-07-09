@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from mnemosyne.cli import cmd_hygiene
 from mnemosyne.core.beam import BeamMemory, init_beam
 from mnemosyne.core.hygiene import (
     AuditReport,
@@ -241,6 +242,26 @@ class TestAuditNoise:
             audit_noise(db_path=db_path, offset=-1)
         with pytest.raises(ValueError, match="batch_size must be > 0"):
             audit_noise(db_path=db_path, batch_size=0)
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["audit", "--limit"], "--limit requires a value"),
+            (["audit", "--offset"], "--offset requires a value"),
+            (["audit", "--batch-size"], "--batch-size requires a value"),
+            (["audit", "--min-score"], "--min-score requires a value"),
+            (["audit", "--bogus"], "Unknown hygiene audit option: --bogus"),
+            (["status", "--limit"], "--limit requires a value"),
+            (["status", "--bogus"], "Unknown hygiene status option: --bogus"),
+            (["restore", "--limit"], "--limit requires a value"),
+            (["restore", "--bogus"], "Unknown hygiene restore option: --bogus"),
+        ],
+    )
+    def test_cmd_hygiene_fails_fast_on_invalid_options(self, args, message, capsys):
+        with pytest.raises(SystemExit):
+            cmd_hygiene(args)
+
+        assert message in capsys.readouterr().err
 
     def test_hygiene_status_without_audit_log(self, temp_db):
         db_path, _beam = temp_db
