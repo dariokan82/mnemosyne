@@ -1602,6 +1602,37 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
 
         return None
 
+    def _write_approval_enabled(self) -> bool:
+        """Check whether memory.write_approval is enabled in Hermes config.
+
+        Reads the top-level ``memory.write_approval`` boolean from Hermes
+        config.yaml (NOT ``memory.mnemosyne.write_approval``). Defaults to
+        ``False`` when the key is missing or unparsable.
+
+        This gates ALL memory writes (both legacy MEMORY.md and Mnemosyne
+        SQLite writes) through a single boolean, so users get consistent
+        protection regardless of which provider is active.
+        """
+        hermes_home = getattr(self, "_hermes_home", None)
+        if not hermes_home:
+            return False
+        config_path = os.path.join(hermes_home, "config.yaml")
+        if not os.path.exists(config_path):
+            return False
+        try:
+            import yaml
+        except ImportError:
+            return False
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f) or {}
+        except Exception:
+            return False
+        memory = config.get("memory")
+        if not isinstance(memory, dict):
+            return False
+        return bool(memory.get("write_approval", False))
+
     def _configured_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return schemas filtered by memory.mnemosyne.tools, if configured.
 
@@ -2497,6 +2528,43 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
         )
         if not content:
             return json.dumps({"error": "content is required"})
+
+        # ── Write-approval gate ──────────────────────────────────────
+        if self._write_approval_enabled():
+            import uuid as _uuid_mod
+            pid = _uuid_mod.uuid4().hex[:8]
+            record = {
+                "id": pid,
+                "subsystem": "memory",
+                "action": "add",
+                "summary": content[:200],
+                "origin": "mnemosyne_remember",
+                "created_at": time.time(),
+                "payload": {
+                    "target": args.get("target", "memory"),
+                    "content": content,
+                    "importance": importance,
+                    "source": source,
+                    "scope": scope,
+                    "valid_until": valid_until,
+                    "extract_entities": extract_entities,
+                    "extract": extract,
+                    "metadata": metadata,
+                    "veracity": veracity,
+                },
+            }
+            hermes_home = getattr(self, "_hermes_home", None) or os.path.expanduser("~/.hermes")
+            pending_dir = Path(hermes_home) / "pending" / "memory"
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            pending_path = pending_dir / f"{pid}.json"
+            pending_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            return json.dumps({
+                "staged": True,
+                "pending_id": pid,
+                "message": "Memory staged for approval. Review with /memory pending."
+            })
+        # ─────────────────────────────────────────────────────────────
+
         memory_id = self._beam.remember(
             content=content,
             importance=importance,
@@ -2530,6 +2598,35 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
 
         if bool(args.get("dry_run", False)):
             return json.dumps(dry_run_batch(normalized))
+
+        # ── Write-approval gate ──────────────────────────────────────
+        if self._write_approval_enabled():
+            import uuid as _uuid_mod
+            staged = []
+            hermes_home = getattr(self, "_hermes_home", None) or os.path.expanduser("~/.hermes")
+            pending_dir = Path(hermes_home) / "pending" / "memory"
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            for op in normalized:
+                pid = _uuid_mod.uuid4().hex[:8]
+                record = {
+                    "id": pid,
+                    "subsystem": "memory",
+                    "action": op.get("action", "unknown"),
+                    "summary": str(op.get("content", ""))[:200],
+                    "origin": "mnemosyne_batch",
+                    "created_at": time.time(),
+                    "payload": op,
+                }
+                pending_path = pending_dir / f"{pid}.json"
+                pending_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                staged.append(pid)
+            return json.dumps({
+                "staged": True,
+                "pending_ids": staged,
+                "count": len(staged),
+                "message": f"{len(staged)} operation(s) staged for approval. Review with /memory pending."
+            })
+        # ─────────────────────────────────────────────────────────────
 
         return json.dumps(apply_beam_batch(
             self._beam,
