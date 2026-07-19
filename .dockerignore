@@ -9,6 +9,11 @@ tests
 scripts
 docs
 tools
+_benchmarks
 assets
 *.md
+# Needed at build time: pyproject.toml's readme= field and MANIFEST.in
+# both point at these, so `python -m build --wheel` fails without them.
+!README.md
+!CHANGELOG.md
 !.dockerignore
