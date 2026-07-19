@@ -23,6 +23,20 @@ Security note (S1, 2026-05-12):
     the server refuses to start. This prevents a LAN attacker from
     reading/writing/deleting the user's memory via an unauthenticated
     MCP endpoint.
+
+OAuth note (2026-07-19):
+    When exposed non-loopback, the server also mounts a minimal OAuth
+    2.1 PKCE shim (see mcp_oauth.py) alongside the bearer-token gate.
+    This is NOT a real multi-tenant authorization server -- there is
+    exactly one user. It exists purely because some MCP clients
+    (claude.ai, Claude Desktop's Connectors UI) only support OAuth-based
+    remote connectors, not raw bearer tokens. The "password" on the
+    /authorize screen IS the existing MNEMOSYNE_MCP_TOKEN, and the
+    access_token handed back at the end of the PKCE exchange is that
+    same token, unchanged -- the real gate is still the bearer-token
+    check on /sse and /messages/. Set MNEMOSYNE_MCP_PUBLIC_URL to the
+    externally-reachable https:// URL so the discovery documents and
+    redirects are correct.
 """
 
 import hmac
@@ -114,7 +128,7 @@ async def _run_stdio() -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-def _build_sse_app(host: str = "127.0.0.1"):
+def _build_sse_app(host: str = "127.0.0.1", port: int = 8080):
     """Build the Starlette app for SSE transport.
 
     Split out from `_run_sse` so the auth-gating + middleware-installation
@@ -226,18 +240,37 @@ def _build_sse_app(host: str = "127.0.0.1"):
             host,
         )
 
-    starlette_app = Starlette(
+    # /sse and /messages/ stay behind the bearer-token gate, nested as a
+    # sub-app so the OAuth routes below (which by definition must be
+    # reachable *before* a client has a token) don't inherit the same
+    # middleware.
+    mcp_app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse, methods=["GET"]),
-            # transport.handle_post_message is an ASGI callable, not a
-            # request-response endpoint. Mount (not Route) is required so
-            # Starlette passes scope/receive/send directly without wrapping
-            # the response. The trailing slash must match the transport path.
             Mount("/messages/", app=transport.handle_post_message),
         ],
         middleware=middleware,
     )
-    return starlette_app
+
+    outer_routes = []
+    if require_auth:
+        # OAuth 2.1 PKCE shim -- see mcp_oauth.py for why this exists.
+        # Reuses the same MNEMOSYNE_MCP_TOKEN as both the /authorize
+        # password and the final access_token; no separate secret.
+        from mnemosyne.mcp_oauth import build_oauth_routes
+
+        public_url = (
+            os.environ.get("MNEMOSYNE_MCP_PUBLIC_URL") or f"http://{host}:{port}"
+        ).rstrip("/")
+        outer_routes.extend(build_oauth_routes(token, public_url))
+        logger.info(
+            "OAuth PKCE shim enabled at %s (discovery + /authorize + /oauth/token).",
+            public_url,
+        )
+
+    outer_routes.append(Mount("/", app=mcp_app))
+
+    return Starlette(routes=outer_routes)
 
 
 async def _run_sse(port: int = 8080, host: str = "127.0.0.1") -> None:
@@ -254,7 +287,7 @@ async def _run_sse(port: int = 8080, host: str = "127.0.0.1") -> None:
             "Run: pip install starlette uvicorn"
         )
 
-    app = _build_sse_app(host=host)
+    app = _build_sse_app(host=host, port=port)
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     await uvicorn.Server(config).serve()
 
