@@ -29,13 +29,19 @@ LABEL org.opencontainers.image.description="Universal memory layer MCP server fo
 LABEL org.opencontainers.image.source="https://github.com/dariokan82/mnemosyne"
 LABEL org.opencontainers.image.licenses="MIT"
 
+# gosu: drop root cleanly after the entrypoint reconciles uid/gid at
+# container start (see entrypoint.sh). build-essential/cmake/git:
 # llama-cpp-python may need to compile from source if no prebuilt wheel
-# matches this platform's arch/glibc. Keep build tools for the install
-# step, then purge them so the runtime image doesn't carry a compiler.
+# matches this platform; purged after the pip install below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake git \
+      gosu build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
 
+# uid/gid 1000 here is just a placeholder -- entrypoint.sh rewrites both
+# to PUID/PGID at container start (default: same setup as the
+# linuxserver.io syncthing/plex images already on Trevor), so the bind
+# mount ends up owned by whichever Synology account you point it at
+# instead of a hardcoded guess.
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mnemosyne
 
 COPY --from=builder /build/dist/*.whl /tmp/
@@ -51,12 +57,14 @@ RUN pip install --no-cache-dir "$(ls /tmp/*.whl)[all]" && rm -rf /tmp/*.whl \
 ENV MNEMOSYNE_DATA_DIR=/data
 ENV HOME=/data/home
 VOLUME /data
-RUN mkdir -p /data/home && chown -R mnemosyne:mnemosyne /data
 
-USER mnemosyne
+COPY deploy/synology/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD python -c "from mnemosyne import recall; recall('health', top_k=1)" || exit 1
 
-ENTRYPOINT ["mnemosyne", "mcp"]
+# Stays root until entrypoint.sh drops to the mnemosyne user via gosu --
+# it needs root to usermod/chown at startup.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

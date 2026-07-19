@@ -7,15 +7,14 @@
 # internet). Runs alongside the existing mnemo-mcp container/data; nothing
 # here touches /volume1/docker/mnemosine.
 #
-# Before first deploy, on the Synology host:
-#   mkdir -p /volume1/docker/mnemosyne
-#   chown -R 1000:1000 /volume1/docker/mnemosyne
-# (the image runs as uid 1000; DSM bind mounts don't inherit the image's
-# in-container chown, so this has to happen on the host side or the
-# container gets Permission Denied writing to /data.)
-#
-# Set API_TOKEN in the stack's environment (Portainer stack env, or a
-# .env file next to this compose file if running plain `docker compose`).
+# Set in the stack's environment (Portainer stack env, or a .env file next
+# to this compose file if running plain `docker compose`):
+#   API_TOKEN  - bearer token clients must send, e.g. `openssl rand -hex 32`
+#   PUID/PGID  - your Synology account's uid/gid (`id <your-dsm-username>`
+#                over SSH). The entrypoint chowns /data to this at every
+#                start, same convention as the linuxserver.io syncthing/plex
+#                containers already on this host. Defaults to 1000/1000 if
+#                unset.
 
 services:
   mnemosyne-mcp:
@@ -31,4 +30,6 @@ services:
       - MNEMOSYNE_VEC_TYPE=int8
       - MNEMOSYNE_LLM_ENABLED=true
       - MNEMOSYNE_MCP_TOKEN=${API_TOKEN}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
     command: ["--transport", "sse", "--host", "0.0.0.0", "--port", "8181"]

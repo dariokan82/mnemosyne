@@ -6,16 +6,18 @@ Trevor. It runs **alongside** the legacy `mnemo-mcp` container until
 migration is actually done -- nothing here touches that container or its
 data under `/volume1/docker/mnemosine`.
 
-## 1. One-time host prep
+## 1. Find your account's uid/gid
 
-SSH into Trevor (or use a Portainer console) and create the bind-mount
-directory with the right owner -- the image runs as uid 1000, and DSM
-bind mounts don't inherit the in-container `chown`:
+SSH into Trevor and run:
 
 ```sh
-mkdir -p /volume1/docker/mnemosyne
-chown -R 1000:1000 /volume1/docker/mnemosyne
+id <your-dsm-username>
 ```
+
+You'll use the `uid=` / `gid=` values as `PUID`/`PGID` below, so the
+container's files come out owned by your actual account (browsable in
+File Station, editable over SSH) instead of a hardcoded guess. Same
+convention as the `syncthing` and `plex` containers already on this host.
 
 ## 2. Deploy the stack in Portainer
 
@@ -29,7 +31,15 @@ Same git-stack pattern as the other *-mcp stacks:
    - `API_TOKEN` = a fresh secret, e.g. output of `openssl rand -hex 32`
      (this becomes the `Authorization: Bearer <token>` clients must send --
      see the security note in `mnemosyne/mcp_server.py`)
+   - `PUID` / `PGID` = the values from step 1 (defaults to 1000/1000 if
+     you skip this)
 6. Deploy the stack.
+
+The entrypoint reconciles the in-container user to PUID/PGID and chowns
+`/data` to match on every start, so there's no manual host-side chown step
+before first boot -- just make sure `/volume1/docker/mnemosyne` exists (or
+let Docker create it, which it will as root and the entrypoint will then
+fix on first start).
 
 First boot downloads the fastembed model (~100MB) and the local GGUF
 summarization model (~656MB, openbmb/MiniCPM5-1B-GGUF) from HuggingFace.
