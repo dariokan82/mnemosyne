@@ -13,8 +13,8 @@ directory with the right owner -- the image runs as uid 1000, and DSM
 bind mounts don't inherit the in-container `chown`:
 
 ```sh
-mkdir -p /volume1/docker/mnemosyne-mcp
-chown -R 1000:1000 /volume1/docker/mnemosyne-mcp
+mkdir -p /volume1/docker/mnemosyne
+chown -R 1000:1000 /volume1/docker/mnemosyne
 ```
 
 ## 2. Deploy the stack in Portainer
