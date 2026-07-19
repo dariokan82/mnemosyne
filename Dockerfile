@@ -32,7 +32,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 # gosu: drop root cleanly after the entrypoint reconciles uid/gid at
 # container start (see entrypoint.sh). build-essential/cmake/git:
 # llama-cpp-python may need to compile from source if no prebuilt wheel
-# matches this platform; purged after the pip install below.
+# matches this platform; purged after the pip installs below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gosu build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
@@ -43,6 +43,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # mount ends up owned by whichever Synology account you point it at
 # instead of a hardcoded guess.
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mnemosyne
+
+# Cache-friendly split: pre-install the [all] extras' actual third-party
+# packages -- this is what pays for llama-cpp-python's from-source compile
+# -- in their own layer, BEFORE the app wheel below. The wheel is rebuilt
+# from the full source tree on every commit, so its checksum (and thus
+# Docker's cache key) changes every time, regardless of whether any
+# dependency version moved. Without this split, `pip install <wheel>[all]`
+# would recompile llama-cpp-python from scratch on every single commit,
+# even a one-line doc change. Keep this list in sync with pyproject.toml's
+# [project.optional-dependencies] "all" entry.
+RUN pip install --no-cache-dir \
+      "ctransformers>=0.2.27" \
+      "llama-cpp-python>=0.2.0" \
+      "huggingface-hub>=0.20" \
+      "fastembed>=0.3.0" \
+      "sqlite-vec>=0.1.0" \
+      "mcp>=1.0.0" \
+      "anyio>=4.0" \
+      "cryptography>=41.0"
 
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir "$(ls /tmp/*.whl)[all]" && rm -rf /tmp/*.whl \
