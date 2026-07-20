@@ -19,6 +19,16 @@
 #                start, same convention as the linuxserver.io syncthing/plex
 #                containers already on this host. Defaults to 1000/1000 if
 #                unset.
+#
+# mnemosyne-sleep (2026-07-20): second service, same image, same bind
+# mount. Nothing in the MCP server process ever calls `mnemosyne sleep` on
+# its own -- confirmed by reading mcp_server.py and entrypoint.sh, no
+# scheduler exists anywhere in this image -- so without this, working
+# memory accumulates forever and episodic promotion / tiered degradation
+# never run. This service runs entrypoint.sh's sleep-loop mode instead of
+# starting the MCP server. MNEMOSYNE_SLEEP_INTERVAL_SECONDS controls the
+# interval (default 21600 = 6h). Safe to run alongside mnemosyne-mcp:
+# WAL mode + busy_timeout are already on for the sqlite connection.
 
 services:
   mnemosyne-mcp:
@@ -35,6 +45,20 @@ services:
       - MNEMOSYNE_LLM_ENABLED=true
       - MNEMOSYNE_MCP_TOKEN=${API_TOKEN}
       - MNEMOSYNE_MCP_PUBLIC_URL=${MNEMOSYNE_MCP_PUBLIC_URL}
+      - MNEMOSYNE_DEFAULT_EXTRACT_ENTITIES=true
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     command: ["--transport", "sse", "--host", "0.0.0.0", "--port", "8181"]
+
+  mnemosyne-sleep:
+    build: .
+    container_name: mnemosyne-sleep
+    restart: unless-stopped
+    volumes:
+      - /volume1/docker/mnemosyne:/data
+    environment:
+      - MNEMOSYNE_DATA_DIR=/data
+      - MNEMOSYNE_SLEEP_INTERVAL_SECONDS=21600
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    command: ["sleep-loop"]

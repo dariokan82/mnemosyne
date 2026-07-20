@@ -169,6 +169,24 @@ def _resolve_default_scope() -> str:
     return "session"
 
 
+def _resolve_default_extract_entities() -> bool:
+    """Resolve default extract_entities for remember() calls.
+
+    Precedence: MNEMOSYNE_DEFAULT_EXTRACT_ENTITIES env var, falling back to
+    False. A per-call extract_entities value (True or False) always
+    overrides this, same precedence shape as _resolve_default_scope().
+
+    Entity extraction is regex + Levenshtein, no LLM involved -- measured
+    marginal cost is under 1s per call including embedding overhead, safe
+    to default on. This is deliberately NOT extended to `extract` (LLM
+    fact extraction): measured ~30s marginal latency per call against this
+    deployment's local GGUF backend, which would make every remember()
+    call from every client block for half a minute. `extract` stays
+    opt-in."""
+    raw = os.environ.get("MNEMOSYNE_DEFAULT_EXTRACT_ENTITIES", "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
 def _serialize(obj):
     """Recursively convert non-serializable objects (datetime, etc.) to strings."""
     if hasattr(obj, "isoformat"):
@@ -231,7 +249,7 @@ def _handle_remember(arguments: Dict[str, Any]) -> Dict[str, Any]:
     source = arguments.get("source", "mcp")
     importance = arguments.get("importance", 0.5)
     metadata = arguments.get("metadata", {})
-    extract_entities = arguments.get("extract_entities", False)
+    extract_entities = arguments.get("extract_entities", _resolve_default_extract_entities())
     extract = arguments.get("extract", False)
     scope = arguments.get("scope", _resolve_default_scope())
     valid_until = arguments.get("valid_until") or None
