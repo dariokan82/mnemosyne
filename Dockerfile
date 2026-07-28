@@ -33,8 +33,15 @@ LABEL org.opencontainers.image.licenses="MIT"
 # container start (see entrypoint.sh). build-essential/cmake/git:
 # llama-cpp-python may need to compile from source if no prebuilt wheel
 # matches this platform; purged after the pip installs below.
+#
+# libgomp1 is named explicitly even though build-essential already pulls
+# it in as a gcc dependency. llama_cpp's libllama.so links against it at
+# *runtime*, but as an auto-installed dependency it was swept away by the
+# `purge --auto-remove` below -- leaving an image where importing
+# llama_cpp raises `libgomp.so.1: cannot open shared object file`.
+# Naming it here marks it manually-installed, which --auto-remove spares.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gosu build-essential cmake git \
+      gosu build-essential cmake git libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # uid/gid 1000 here is just a placeholder -- entrypoint.sh rewrites both

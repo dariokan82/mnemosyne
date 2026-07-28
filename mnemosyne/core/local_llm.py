@@ -108,9 +108,17 @@ def _download_model() -> Path:
 
 def _load_llm_llamacpp(model_path: Path):
     """Load the GGUF model via llama-cpp-python. Returns Llama instance or None."""
+    # Not just ImportError: llama_cpp resolves libllama.so at import time and
+    # re-raises a dlopen failure as RuntimeError (see
+    # llama_cpp/_ctypes_extensions.py::load_shared_library), which is not an
+    # ImportError subclass. Letting that escape defeated every "returns None
+    # if no backend works" contract downstream -- it propagated out of
+    # llm_available() and aborted BeamMemory.sleep() mid-cycle, after the
+    # rows were claimed but before any summary was written, orphaning the
+    # whole batch. An unusable backend must degrade to AAAK, not hard-fail.
     try:
         from llama_cpp import Llama
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
         return None
 
     try:
@@ -129,9 +137,11 @@ def _load_llm_ctransformers(model_path: Path):
     """Load the GGUF model via ctransformers (x86_64 only). Returns model or None."""
     _ensure_sys_path()
 
+    # Same widened catch as _load_llm_llamacpp: a native-extension load
+    # failure here surfaces as OSError/RuntimeError, not ImportError.
     try:
         from ctransformers import AutoModelForCausalLM
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
         return None
 
     try:

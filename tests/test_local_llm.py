@@ -1,6 +1,8 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -595,3 +597,82 @@ class TestRemoteLLMFallback:
             fb_call = m.call_args_list[1]
             assert fb_call.kwargs["base_url"] == "http://primary/v1"
             assert fb_call.kwargs["api_key"] == "primary-key"
+
+
+# Captured at import time, before conftest's autouse
+# ``_disable_local_llm_inference`` fixture swaps _load_llm for a stub that
+# returns None. Tests below that need the *real* loader reinstate this --
+# without it they'd be asserting against the stub, which returns None for
+# every input and would pass no matter how broken the loader is.
+_REAL_LOAD_LLM = local_llm._load_llm
+
+
+class TestBrokenNativeBackendDegrades:
+    """A native backend that imports but cannot dlopen must degrade, not raise.
+
+    Regression for the Trevor incident: the runtime image lost libgomp1 to
+    `apt-get purge --auto-remove`, so `from llama_cpp import Llama` raised
+    RuntimeError (llama_cpp re-wraps the dlopen OSError). The loader only
+    caught ImportError, so the RuntimeError escaped llm_available() and
+    aborted BeamMemory.sleep() *after* it had claimed its batch and before
+    it wrote any summary -- orphaning 108 working-memory rows behind a
+    consolidated_at marker with no episodic summary to show for it.
+    """
+
+    class _ExplodingModule:
+        """Stands in for a package whose native library fails to load."""
+
+        def __init__(self, exc):
+            self._exc = exc
+
+        def __getattr__(self, name):
+            raise self._exc
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError(
+                "Failed to load shared library 'libllama.so': "
+                "libgomp.so.1: cannot open shared object file: No such file or directory"
+            ),
+            OSError("libgomp.so.1: cannot open shared object file"),
+            ImportError("no module named llama_cpp"),
+        ],
+        ids=["runtime-dlopen", "oserror", "importerror"],
+    )
+    def test_llamacpp_loader_returns_none_instead_of_raising(self, exc, monkeypatch):
+        monkeypatch.setitem(sys.modules, "llama_cpp", self._ExplodingModule(exc))
+        assert local_llm._load_llm_llamacpp(Path("/nonexistent/model.gguf")) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("native extension failed to load"),
+            OSError("libstdc++.so.6: cannot open shared object file"),
+            ImportError("no module named ctransformers"),
+        ],
+        ids=["runtime-dlopen", "oserror", "importerror"],
+    )
+    def test_ctransformers_loader_returns_none_instead_of_raising(self, exc, monkeypatch):
+        monkeypatch.setitem(sys.modules, "ctransformers", self._ExplodingModule(exc))
+        assert local_llm._load_llm_ctransformers(Path("/nonexistent/model.gguf")) is None
+
+    def test_llm_available_reports_false_when_both_backends_broken(self, monkeypatch):
+        """The contract sleep() relies on: unusable backend => False, no raise."""
+        broken = RuntimeError("libgomp.so.1: cannot open shared object file")
+        monkeypatch.setitem(sys.modules, "llama_cpp", self._ExplodingModule(broken))
+        monkeypatch.setitem(sys.modules, "ctransformers", self._ExplodingModule(broken))
+        # Force the local-GGUF path: no host backend, no remote endpoint,
+        # cold cache, and a model file that "exists" so we reach the loaders.
+        set_host_llm_backend(None)
+        monkeypatch.setattr(local_llm, "LLM_BASE_URL", "")
+        monkeypatch.setattr(local_llm, "LLM_ENABLED", True)
+        monkeypatch.setattr(local_llm, "_llm_available", None)
+        monkeypatch.setattr(local_llm, "_llm_instance", None)
+        monkeypatch.setattr(local_llm, "_model_path", lambda: Path("/nonexistent/model.gguf"))
+        monkeypatch.setattr(local_llm, "_load_llm", _REAL_LOAD_LLM)
+
+        assert local_llm.llm_available() is False
+        # Not just the return value: the negative result must be cached, or
+        # every sleep group re-attempts the dlopen and re-raises.
+        assert local_llm._llm_available is False
