@@ -84,6 +84,17 @@ ENV MNEMOSYNE_DATA_DIR=/data
 ENV HOME=/data/home
 VOLUME /data
 
+# Deliberately its own layer, below the expensive installs above: the
+# llama-cpp-python wheel compiles from source here (~20 min on this host,
+# no manylinux wheel on PyPI), so anything that invalidates that layer
+# costs a full recompile. anthropic is a pure-Python wheel -- installing it
+# last means bumping it rebuilds seconds, not minutes. Same reasoning as
+# the [all]-extras split above; see also the libgomp1 note near the top,
+# which is the counter-example that cost a full rebuild.
+RUN pip install --no-cache-dir "anthropic>=0.40"
+
+COPY scripts/claude_sleep.py /usr/local/bin/claude_sleep.py
+
 COPY deploy/synology/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

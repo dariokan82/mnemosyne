@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""One-off: run sleep consolidation with Claude as the summarizer.
+"""Run sleep consolidation with Claude as the summarizer.
 
 The local MiniCPM5-1B GGUF is unusably slow on Trevor's CPU -- a single
-39-item group ran >45 minutes without producing one episodic summary. This
-script routes summarization AND fact extraction through the Anthropic API
-instead, using mnemosyne's own host-backend registry
-(mnemosyne/core/llm_backends.py) rather than the OpenAI-shaped
-MNEMOSYNE_LLM_BASE_URL path, which expects /chat/completions and does not
-match the Messages API shape.
+39-item group ran past 45 minutes without emitting one episodic summary,
+burning ~95 CPU-minutes. This routes summarization and fact extraction
+through the Anthropic API instead, via mnemosyne's own host-backend
+registry (mnemosyne/core/llm_backends.py).
 
-Usage (inside the mnemosyne-sleep container, as the mnemosyne user):
+Deliberately not the MNEMOSYNE_LLM_BASE_URL path: _call_remote_llm POSTs
+OpenAI-shaped JSON to {base_url}/chat/completions, which is not the
+Messages API shape, so that route would need a translating gateway.
 
-    pip install anthropic
-    ANTHROPIC_API_KEY=... \
-    MNEMOSYNE_HOST_LLM_ENABLED=true \
-    MNEMOSYNE_DATA_DIR=/data \
-      python /data/claude_sleep.py
+Invoked by entrypoint.sh's sleep-loop mode. Also runnable by hand:
 
-Optional:
-    MNEMOSYNE_HOST_LLM_MODEL   model id (default: claude-opus-5)
-    MNEMOSYNE_HOST_LLM_TIMEOUT per-call timeout in seconds (default: 15)
+    ANTHROPIC_API_KEY=... MNEMOSYNE_HOST_LLM_ENABLED=true \
+      python /data/claude_sleep.py [--reclaim-now]
 
-Both env vars are read at import time by mnemosyne.core.local_llm, so they
-must be set on the command line -- setting them after import has no effect.
+Env (all read at import time by mnemosyne.core.local_llm, so they must be
+set on the command line -- exporting them afterwards has no effect):
+
+    MNEMOSYNE_HOST_LLM_ENABLED  must be true, or this exits
+    MNEMOSYNE_HOST_LLM_MODEL    model id (default: claude-opus-5)
+    MNEMOSYNE_HOST_LLM_TIMEOUT  per-call timeout, seconds (default 15,
+                                floored to MIN_TIMEOUT_SECONDS below)
 """
 
 import os
@@ -38,6 +38,10 @@ MIN_TIMEOUT_SECONDS = 120.0
 _client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
 
+def _model_id(override=None):
+    return override or os.environ.get("MNEMOSYNE_HOST_LLM_MODEL") or DEFAULT_MODEL
+
+
 def complete(prompt, *, max_tokens, temperature, timeout, provider=None, model=None):
     """Host-backend adapter: prompt in, text-or-None out.
 
@@ -49,20 +53,21 @@ def complete(prompt, *, max_tokens, temperature, timeout, provider=None, model=N
     because the local GGUF path needs it; dropping it here is the whole
     reason this adapter exists rather than a generic passthrough.
 
-    Returning None on failure is the contract -- _try_host_llm() treats it
-    as "attempted but empty" and falls through to the local GGUF.
+    Returning None is the failure contract -- _try_host_llm() reads it as
+    "attempted but empty" and, per its precedence rule, falls through to
+    the local GGUF. That fallback is why main() preflights the API: an
+    unattended loop that silently degrades to the GGUF would grind for
+    hours per cycle instead of failing fast.
     """
     # MNEMOSYNE_HOST_LLM_TIMEOUT defaults to 15s (local_llm.py:57) -- sized for
     # a host-local aux client, not a remote API call. Thinking is on by
-    # default on Claude Opus 5, so a summarization call routinely exceeds it
-    # and the whole run then falls through to the local GGUF, which is the
-    # slow path this script exists to avoid. Floor it; raising the env var
-    # above the floor still wins.
+    # default on Claude Opus 5, so a summarization call exceeds it. Floor it;
+    # an explicitly raised env var still wins.
     timeout = max(timeout, MIN_TIMEOUT_SECONDS)
 
     try:
         response = _client.with_options(timeout=timeout).messages.create(
-            model=model or os.environ.get("MNEMOSYNE_HOST_LLM_MODEL") or DEFAULT_MODEL,
+            model=_model_id(model),
             max_tokens=max_tokens,
             # Summarizing a handful of memories into 1-3 sentences is not a
             # reasoning-heavy task; low effort keeps latency and cost down
@@ -84,11 +89,23 @@ def complete(prompt, *, max_tokens, temperature, timeout, provider=None, model=N
 
 
 def main():
+    reclaim_now = "--reclaim-now" in sys.argv[1:]
+
     if os.environ.get("MNEMOSYNE_HOST_LLM_ENABLED", "").lower() not in ("1", "true", "yes"):
         sys.exit(
             "MNEMOSYNE_HOST_LLM_ENABLED must be true on the command line.\n"
             "It is read at import time, so exporting it later has no effect."
         )
+
+    # Preflight: a metadata GET, so it costs no tokens. Catches a missing or
+    # revoked key, a blocked egress path, and an unavailable model before we
+    # claim any rows -- all cases where proceeding would fall through to the
+    # GGUF and grind. Fail fast instead; the loop retries next cycle.
+    model = _model_id()
+    try:
+        _client.models.retrieve(model)
+    except Exception as exc:
+        sys.exit(f"preflight failed for {model} ({type(exc).__name__}): {exc}")
 
     set_host_llm_backend(CallableLLMBackend(name="anthropic", func=complete))
 
@@ -98,13 +115,14 @@ def main():
     if not local_llm.llm_available():
         sys.exit("llm_available() is False -- the host backend did not register.")
 
-    model = os.environ.get("MNEMOSYNE_HOST_LLM_MODEL") or DEFAULT_MODEL
     print(f"Summarizing via {model}\n", flush=True)
 
-    # stale_after_seconds=0 also frees claims left by an interrupted run.
-    # Safe only because nothing else is sleeping concurrently -- check that
-    # the sleep-loop (PID 1) is parked in `sleep` before running this.
-    print("reclaim:", reclaim_orphans(stale_after_seconds=0), "\n", flush=True)
+    # Default to the 1-hour staleness guard so a scheduled run can never
+    # steal a claim from a concurrent sleep. --reclaim-now drops it to 0 for
+    # interactive cleanup after an interrupted run, which is only safe when
+    # you have confirmed nothing else is sleeping.
+    stale_after = 0 if reclaim_now else 3600
+    print("reclaim:", reclaim_orphans(stale_after_seconds=stale_after), "\n", flush=True)
     print("sleep:", sleep_all_sessions(), flush=True)
 
 

@@ -45,11 +45,26 @@ chown -R mnemosyne:mnemosyne /data
 if [ "$1" = "sleep-loop" ]; then
   interval="${MNEMOSYNE_SLEEP_INTERVAL_SECONDS:-21600}"
   echo "mnemosyne-sleep: starting periodic consolidation loop (every ${interval}s)"
+  # Summarizer selection. The local MiniCPM5-1B GGUF is unusably slow on
+  # this host -- one 39-item group ran past 45 minutes without emitting a
+  # single summary -- so when an Anthropic key is present we route
+  # summarization and fact extraction through the API instead
+  # (claude_sleep.py, via mnemosyne's host-backend registry). Without a key
+  # we fall back to the plain CLI, which still consolidates correctly, just
+  # slowly. The runner preflights the API and exits non-zero rather than
+  # silently degrading to the GGUF, so a bad key costs one logged cycle.
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "mnemosyne-sleep: summarizing via Anthropic API"
+    runner='MNEMOSYNE_HOST_LLM_ENABLED=true python /usr/local/bin/claude_sleep.py'
+  else
+    echo "mnemosyne-sleep: no ANTHROPIC_API_KEY -- falling back to the local model"
+    runner='mnemosyne sleep --all-sessions'
+  fi
   exec gosu mnemosyne sh -c '
     while true; do
-      echo "[$(date -Iseconds)] running mnemosyne sleep --all-sessions"
-      mnemosyne sleep --all-sessions \
-        || echo "[$(date -Iseconds)] mnemosyne sleep failed (continuing)"
+      echo "[$(date -Iseconds)] running '"$runner"'"
+      '"$runner"' \
+        || echo "[$(date -Iseconds)] sleep run failed (continuing)"
       sleep "'"$interval"'"
     done
   '

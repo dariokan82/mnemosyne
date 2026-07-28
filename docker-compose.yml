@@ -59,6 +59,13 @@ services:
     environment:
       - MNEMOSYNE_DATA_DIR=/data
       - MNEMOSYNE_SLEEP_INTERVAL_SECONDS=21600
+      # With a key set, consolidation summarizes via the Anthropic API
+      # instead of the local GGUF, which is unusably slow on this host.
+      # Leave ANTHROPIC_API_KEY unset in the stack env to fall back to the
+      # local model -- the entrypoint picks based on its presence.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MNEMOSYNE_HOST_LLM_MODEL=${MNEMOSYNE_HOST_LLM_MODEL:-claude-opus-5}
+      - MNEMOSYNE_HOST_LLM_TIMEOUT=${MNEMOSYNE_HOST_LLM_TIMEOUT:-120}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     command: ["sleep-loop"]
