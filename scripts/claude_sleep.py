@@ -33,6 +33,7 @@ import anthropic
 from mnemosyne.core.llm_backends import CallableLLMBackend, set_host_llm_backend
 
 DEFAULT_MODEL = "claude-opus-5"
+MIN_TIMEOUT_SECONDS = 120.0
 
 _client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
@@ -51,6 +52,14 @@ def complete(prompt, *, max_tokens, temperature, timeout, provider=None, model=N
     Returning None on failure is the contract -- _try_host_llm() treats it
     as "attempted but empty" and falls through to the local GGUF.
     """
+    # MNEMOSYNE_HOST_LLM_TIMEOUT defaults to 15s (local_llm.py:57) -- sized for
+    # a host-local aux client, not a remote API call. Thinking is on by
+    # default on Claude Opus 5, so a summarization call routinely exceeds it
+    # and the whole run then falls through to the local GGUF, which is the
+    # slow path this script exists to avoid. Floor it; raising the env var
+    # above the floor still wins.
+    timeout = max(timeout, MIN_TIMEOUT_SECONDS)
+
     try:
         response = _client.with_options(timeout=timeout).messages.create(
             model=model or os.environ.get("MNEMOSYNE_HOST_LLM_MODEL") or DEFAULT_MODEL,
