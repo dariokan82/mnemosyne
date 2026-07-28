@@ -30,13 +30,26 @@ chown -R mnemosyne:mnemosyne /data
 # second compose service (mnemosyne-sleep) against the same bind-mounted
 # DB. WAL mode + busy_timeout are already on for the sqlite connection
 # (see core/memory.py::_get_connection), so a second writer is safe.
+#
+# --all-sessions is required, not optional. Bare `mnemosyne sleep` routes
+# to the session-scoped BeamMemory.sleep(), which filters
+# `COALESCE(session_id,'default') = 'default'` -- but every write through
+# the MCP server is tagged `mcp_<bank>` (mcp_tools.py::_create_instance),
+# so the two sets never intersect and the loop logs "No old working
+# memories to consolidate" forever while nothing is consolidated. That
+# matters beyond the missing summaries: _trim_working_memory() deletes
+# working_memory rows with consolidated_at IS NULL past
+# WORKING_MEMORY_TTL_HOURS (168h), and exempts consolidated ones. Sleep
+# is what saves a memory from the reaper, so a sleep that matches nothing
+# is silent data loss on a 7-day fuse.
 if [ "$1" = "sleep-loop" ]; then
   interval="${MNEMOSYNE_SLEEP_INTERVAL_SECONDS:-21600}"
   echo "mnemosyne-sleep: starting periodic consolidation loop (every ${interval}s)"
   exec gosu mnemosyne sh -c '
     while true; do
-      echo "[$(date -Iseconds)] running mnemosyne sleep"
-      mnemosyne sleep || echo "[$(date -Iseconds)] mnemosyne sleep failed (continuing)"
+      echo "[$(date -Iseconds)] running mnemosyne sleep --all-sessions"
+      mnemosyne sleep --all-sessions \
+        || echo "[$(date -Iseconds)] mnemosyne sleep failed (continuing)"
       sleep "'"$interval"'"
     done
   '
