@@ -93,7 +93,10 @@ VOLUME /data
 # which is the counter-example that cost a full rebuild.
 RUN pip install --no-cache-dir "anthropic>=0.40"
 
-COPY scripts/claude_sleep.py /usr/local/bin/claude_sleep.py
+# Lives under deploy/synology/ rather than scripts/ because .dockerignore
+# excludes the whole scripts/ tree -- an explicit COPY from there fails the
+# build with "not found", since the path never enters the build context.
+COPY deploy/synology/claude_sleep.py /usr/local/bin/claude_sleep.py
 
 COPY deploy/synology/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
