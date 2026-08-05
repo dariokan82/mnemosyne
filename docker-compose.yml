@@ -42,9 +42,33 @@ services:
     environment:
       - MNEMOSYNE_DATA_DIR=/data
       - MNEMOSYNE_VEC_TYPE=int8
-      - MNEMOSYNE_LLM_ENABLED=true
-      - MNEMOSYNE_MCP_TOKEN=${API_TOKEN}
-      - MNEMOSYNE_MCP_PUBLIC_URL=${MNEMOSYNE_MCP_PUBLIC_URL}
+      # LLM disabled here on purpose (2026-08-05). This service has no
+      # ANTHROPIC_API_KEY and no MNEMOSYNE_LLM_BASE_URL, so with this set
+      # to true, mnemosyne_remember(extract=True) walked the fallback
+      # ladder down to the local GGUF rung -- the same local model the
+      # sleep service below deliberately avoids as "unusably slow" -- and
+      # tried to DOWNLOAD it from HuggingFace at request time. That was
+      # this container's first ever outbound TLS connection (embeddings
+      # and sqlite are both local, entity extraction is pure regex), and
+      # OpenSSL's RNDGETENTCNT check found the Synology entropy pool too
+      # thin and BLOCKED rather than erroring -- holding the sqlite lock
+      # and taking both containers unhealthy until a redeploy. With this
+      # false, extract=True degrades to the keyword path instead of
+      # hanging. LLM summarization still happens, in mnemosyne-sleep,
+      # via the Anthropic API. Do not set this true without also giving
+      # this service a real endpoint.
+      - MNEMOSYNE_LLM_ENABLED=false
+      # `:?` on purpose (2026-08-05). An unset API_TOKEN used to substitute
+      # empty, which the S1 guard in mcp_server.py correctly refuses to bind
+      # with -- but the refusal surfaced only as a RuntimeError buried under
+      # a restart loop (97 restarts before anyone read the log). With `:?`,
+      # compose refuses at deploy time and names the missing variable in the
+      # Portainer error banner instead.
+      - MNEMOSYNE_MCP_TOKEN=${API_TOKEN:?API_TOKEN must be set in the Portainer stack env}
+      - MNEMOSYNE_MCP_PUBLIC_URL=${MNEMOSYNE_MCP_PUBLIC_URL:-}
+      # Keep this true: it is the regex entity extractor, not the LLM one.
+      # No network, no model -- it writes the annotations that feed recall's
+      # fact bonus (3.8k rows and counting).
       - MNEMOSYNE_DEFAULT_EXTRACT_ENTITIES=true
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -59,6 +83,14 @@ services:
     environment:
       - MNEMOSYNE_DATA_DIR=/data
       - MNEMOSYNE_SLEEP_INTERVAL_SECONDS=21600
+      # Explicit, not inherited from the default (2026-08-05). This is the
+      # master gate at local_llm.py:23, and _host_backend_will_handle_call()
+      # at :301 requires LLM_ENABLED *and* HOST_LLM_ENABLED both true before
+      # the Anthropic/Opus path is even considered. Flip this to false here
+      # and Claude summarization stops silently -- no error, no log line, it
+      # just walks down to the local GGUF. The mcp service above sets false
+      # for its own reasons; this service must not inherit that.
+      - MNEMOSYNE_LLM_ENABLED=true
       # With a key set, consolidation summarizes via the Anthropic API
       # instead of the local GGUF, which is unusably slow on this host.
       # Leave ANTHROPIC_API_KEY unset in the stack env to fall back to the
