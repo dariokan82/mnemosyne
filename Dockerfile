@@ -60,6 +60,14 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mnemosyne
 # would recompile llama-cpp-python from scratch on every single commit,
 # even a one-line doc change. Keep this list in sync with pyproject.toml's
 # [project.optional-dependencies] "all" entry.
+#
+# One deliberate exception (2026-08-05): pyproject caps mcp at <2, this line
+# does not. Editing this RUN would change its cache key and force the
+# llama-cpp-python from-source rebuild above -- ~20 min -- to buy nothing,
+# because `pip install <wheel>[all]` below re-resolves against the capped
+# constraint and downgrades mcp in seconds. Verified end to end: 2.0.0 in,
+# 1.29.0 out. pyproject is authoritative for versions; this list exists only
+# to warm the cache. If the cap ever changes, change it there.
 RUN pip install --no-cache-dir \
       "ctransformers>=0.2.27" \
       "llama-cpp-python>=0.2.0" \
