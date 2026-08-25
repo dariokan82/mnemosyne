@@ -1110,7 +1110,22 @@ print(json.dumps({"result": result, "after": after}))
         with patch.object(mcp_server, "_build_mcp_server", return_value=object()) as build:
             app = mcp_server._build_sse_app(host="127.0.0.1")
         build.assert_called_once_with()
-        sse_route = next(route for route in app.routes if getattr(route, "path", None) == "/sse")
+        # This fork nests the bearer-gated MCP app under Mount("/") so the
+        # OAuth PKCE discovery routes -- which must be reachable *before* a
+        # client holds a token -- sit outside the auth middleware. /sse is
+        # therefore one level down, not a top-level route. Walk mounts so this
+        # assertion tests the shared-server contract rather than app shape.
+        def _walk(routes):
+            from starlette.routing import Mount
+            for route in routes:
+                yield route
+                if isinstance(route, Mount):
+                    yield from _walk(getattr(getattr(route, "app", None), "routes", None) or [])
+
+        sse_route = next(
+            route for route in _walk(app.routes)
+            if getattr(route, "path", None) == "/sse"
+        )
         assert any(cell.cell_contents is build.return_value for cell in (sse_route.endpoint.__closure__ or ()))
 
     def test_build_mcp_server_list_tools_returns_listtoolsresult(self):

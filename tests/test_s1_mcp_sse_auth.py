@@ -189,7 +189,19 @@ class TestBuildSseApp:
         from mnemosyne.mcp_server import _build_sse_app
         app = _build_sse_app(host="0.0.0.0")
         # At least one middleware entry should be the bearer wrapper.
-        middleware_classes = [m.cls for m in app.user_middleware]
+        # This fork mounts the bearer-gated MCP app under Mount("/") so the
+        # OAuth PKCE discovery routes stay reachable before a client holds a
+        # token, which means the middleware lives on the inner app rather than
+        # the outer one. Collect from both. (Enforcement itself is covered by
+        # the reject tests below, which exercise real requests.)
+        def _all_middleware(a):
+            from starlette.routing import Mount
+            yield from getattr(a, "user_middleware", [])
+            for route in getattr(a, "routes", []):
+                if isinstance(route, Mount) and getattr(route, "app", None) is not None:
+                    yield from _all_middleware(route.app)
+
+        middleware_classes = [m.cls for m in _all_middleware(app)]
         # The inner class is defined locally inside _build_sse_app so we
         # match by class name rather than identity.
         names = [c.__name__ for c in middleware_classes]
