@@ -672,6 +672,9 @@ def _read_secret_file(path: str, label: str) -> str:
     return value
 
 
+_DEFAULT_SYNC_SESSION_ID = "hermes_shared_surface"
+
+
 def cmd_sync_init(args):
     """Explicitly initialize or migrate a dedicated shared-surface DB."""
     import argparse
@@ -680,7 +683,7 @@ def cmd_sync_init(args):
     parser.add_argument("--db-path", required=True, help="Dedicated shared-surface DB")
     parser.add_argument(
         "--session-id",
-        default="hermes_shared_surface",
+        default=_DEFAULT_SYNC_SESSION_ID,
         help="Stable session ID used by the shared-surface Beam",
     )
     parser.add_argument(
@@ -744,6 +747,11 @@ def cmd_sync(args):
         required=True,
         help="Explicit SQLite DB to sync; use the dedicated shared-surface DB, not a private DB",
     )
+    parser.add_argument(
+        "--session-id",
+        default=_DEFAULT_SYNC_SESSION_ID,
+        help="Stable session ID used by the shared-surface Beam",
+    )
     parser.add_argument("--mode", choices=["push", "pull", "bidirectional"], default="bidirectional",
                         help="Sync direction (default: bidirectional)")
     encryption_group = parser.add_mutually_exclusive_group()
@@ -769,7 +777,7 @@ def cmd_sync(args):
     from mnemosyne.core.memory import Mnemosyne
     from mnemosyne.core.sync import SyncEngine, SyncEncryption
 
-    mem = Mnemosyne(db_path=parsed.db_path)
+    mem = Mnemosyne(db_path=parsed.db_path, session_id=parsed.session_id)
 
     encryption_source = parsed.encrypt
     if parsed.encrypt_key_file:
@@ -1188,6 +1196,7 @@ def cmd_hygiene(args):
         hygiene_status,
         restore_archived,
     )
+    from mnemosyne.doctor import open_readonly_doctor_db
 
     if not args or args[0] in ("--help", "-h"):
         print("Usage: mnemosyne hygiene audit|status|clean|restore [options]")
@@ -1231,7 +1240,9 @@ def cmd_hygiene(args):
         if not db_path.exists():
             _fail(f"Database not found at {db_path}")
 
+        conn = None
         try:
+            conn = open_readonly_doctor_db(db_path)
             report = audit_noise(
                 db_path=db_path,
                 limit=limit,
@@ -1239,9 +1250,13 @@ def cmd_hygiene(args):
                 offset=offset,
                 scan_all=scan_all,
                 batch_size=batch_size,
+                conn=conn,
             )
         except (ValueError, sqlite3.Error) as e:
             _fail(str(e))
+        finally:
+            if conn is not None:
+                conn.close()
 
         if as_json:
             print(json.dumps(report.to_dict(), indent=2))
@@ -1278,10 +1293,15 @@ def cmd_hygiene(args):
         db_path = Path(DATA_DIR) / "mnemosyne.db"
         if not db_path.exists():
             _fail(f"Database not found at {db_path}")
+        conn = None
         try:
-            status = hygiene_status(db_path=db_path, limit=limit)
+            conn = open_readonly_doctor_db(db_path)
+            status = hygiene_status(db_path=db_path, limit=limit, conn=conn)
         except (ValueError, sqlite3.Error) as e:
             _fail(str(e))
+        finally:
+            if conn is not None:
+                conn.close()
         if as_json:
             print(json.dumps(status, indent=2))
         else:
@@ -1431,6 +1451,14 @@ def cmd_profile(args):
             if idx + 1 < len(rest):
                 config_path_arg = rest[idx + 1]
 
+        # Captured before the write so the vec_type notice below can tell
+        # whether the value actually changed.
+        try:
+            from mnemosyne.core.config import get_config as _get_config
+            _prev_vec_type = _get_config().get("vec_type")
+        except Exception:
+            _prev_vec_type = None
+
         success, errors = apply_profile(name, config_path=config_path_arg, dry_run=dry_run)
         if not success:
             print(f"Failed to apply profile '{name}':", file=sys.stderr)
@@ -1438,9 +1466,26 @@ def cmd_profile(args):
                 print(f"  {e}", file=sys.stderr)
             raise SystemExit(1)
         mode = "DRY RUN" if dry_run else "APPLIED"
-        print(f"[{mode}] Profile '{name}' — {len(get_profile(name))} settings")
+        applied = get_profile(name) or {}
+        print(f"[{mode}] Profile '{name}' — {len(applied)} settings")
         if not dry_run:
             print("Run 'mnemosyne config reload' to apply changes to a running process.")
+            # vec_type is the one REQUIRES_RESTART key in TEMPLATE_KEYS, and
+            # every profile sets it. 'config reload' cannot apply it, and the
+            # sqlite-vec tables are locked to the type they were created with,
+            # so a change here needs a restart plus a reindex. Saying only
+            # "run config reload" is misleading whenever it changed.
+            try:
+                if applied.get("vec_type") and applied["vec_type"] != _prev_vec_type:
+                    print(
+                        f"\nvec_type changed {_prev_vec_type or '(unset)'} -> "
+                        f"{applied['vec_type']}. This one needs more than a reload:\n"
+                        "  1. restart the process (vec_type is read at startup)\n"
+                        "  2. run 'mnemosyne reindex' to rebuild the vector tables\n"
+                        "Existing vectors are not converted in place."
+                    )
+            except Exception:
+                pass
 
     elif sub == "show":
         if len(rest) < 1:
