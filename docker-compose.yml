@@ -73,6 +73,21 @@ services:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     command: ["--transport", "sse", "--host", "0.0.0.0", "--port", "8181"]
+    # Overrides the image's HEALTHCHECK (2026-09-16). Upstream's probe is
+    # `python -c "from mnemosyne import recall; recall('health', top_k=1)"`
+    # with a 5s timeout: a cold interpreter plus the embedding model, which
+    # cannot finish in five seconds on this host. It had failed 17,862 times
+    # in a row -- roughly one cold model load every 34 seconds for a week,
+    # on a 2-core 2013 CPU, with the result thrown away every time.
+    # This probe answers the only question a container probe can: is the
+    # server listening? No import, no model, no disk.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket,sys; s=socket.create_connection(('127.0.0.1',8181),3); s.close()"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
 
   mnemosyne-sleep:
     build: .
@@ -101,3 +116,10 @@ services:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     command: ["sleep-loop"]
+    # Disabled rather than replaced (2026-09-16). This service has no port and
+    # no cheap liveness signal -- its real health is "did consolidation run six
+    # hours ago", which no container probe can see. Inheriting the image's
+    # model-loading check just painted it permanently red, and a light that can
+    # never go green is worse than no light: it teaches you to ignore lights.
+    healthcheck:
+      disable: true
