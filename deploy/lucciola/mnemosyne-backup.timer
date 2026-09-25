@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the mnemosyne backup nightly
+Description=Run the mnemosyne backup every six hours
 
 [Timer]
-OnCalendar=*-*-* 03:30
+OnCalendar=*-*-* 00/6:30
 Persistent=true
 RandomizedDelaySec=10m
 

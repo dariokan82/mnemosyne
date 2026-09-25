@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly mnemosyne database backup
+Description=mnemosyne database backup (every 6 h)
 Requires=docker.service
 After=docker.service
 

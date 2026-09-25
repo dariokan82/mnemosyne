@@ -1,4 +1,4 @@
-"""Nightly mnemosyne backup (runs inside the mnemosyne image, see backup.sh).
+"""Six-hourly mnemosyne backup (runs inside the mnemosyne image, see backup.sh).
 
 Online copy of every database through SQLite's backup API. That is safe
 while the server and the sleep loop are writing, and each copy is a single
@@ -53,15 +53,38 @@ if (DATA / "config.yaml").exists():
 tmp.rename(dest)
 print(f"backup {dest.name}:", "; ".join(report), flush=True)
 
-# Prune only directories this script named; never touch anything else.
-cutoff = datetime.datetime.now() - datetime.timedelta(days=KEEP_DAYS)
-for old in ROOT.iterdir():
-    if not old.is_dir() or old.name.startswith("."):
-        continue
-    try:
-        when = datetime.datetime.strptime(old.name, "%Y%m%d-%H%M%S")
-    except ValueError:
-        continue
-    if when < cutoff:
-        shutil.rmtree(old)
-        print("pruned", old.name, flush=True)
+
+def prune(root, keep_days):
+    """Delete only directories this script named; never touch anything else."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=keep_days)
+    for old in root.iterdir():
+        if not old.is_dir() or old.name.startswith("."):
+            continue
+        try:
+            when = datetime.datetime.strptime(old.name, "%Y%m%d-%H%M%S")
+        except ValueError:
+            continue
+        if when < cutoff:
+            shutil.rmtree(old)
+            print(f"pruned {root}/{old.name}", flush=True)
+
+
+prune(ROOT, KEEP_DAYS)
+
+# Second copy on the internal HDD, kept longer (history, not just
+# redundancy). backup.sh mounts /mirror only when the HDD is really
+# mounted, so a dead drive can't turn this into a write to the SSD.
+MIRROR = pathlib.Path("/mirror")
+if MIRROR.is_dir():
+    mtmp = MIRROR / f".{stamp}.partial"
+    shutil.rmtree(mtmp, ignore_errors=True)
+    shutil.copytree(dest, mtmp)
+    for line in (mtmp / "SHA256SUMS").read_text().splitlines():
+        digest, rel = line.split("  ", 1)
+        if hashlib.sha256((mtmp / rel).read_bytes()).hexdigest() != digest:
+            sys.exit(f"mirror copy of {rel} does not match its checksum")
+    mtmp.rename(MIRROR / stamp)
+    print(f"mirrored {stamp} to HDD, checksums ok", flush=True)
+    prune(MIRROR, int(os.environ.get("MIRROR_KEEP_DAYS", "60")))
+else:
+    print("HDD mirror not mounted: skipped", flush=True)

@@ -17,8 +17,9 @@
 # Phase 0 snapshot layout) is silently ignored, and an empty bank is
 # created in its place.
 #
-# Backups: deploy/lucciola/backup.sh, run nightly by the systemd timer
-# mnemosyne-backup.timer.
+# Backups: deploy/lucciola/backup.sh, every 6 h (00/06/12/18:30) via the systemd timer
+# mnemosyne-backup.timer. Copies: /srv/mnemosyne/backups (14 d, Syncthing to
+# Trevor) and the internal HDD /mnt/hdd/mnemosyne-backups (60 d, nofail mount).
 
 services:
   mnemosyne-mcp:
