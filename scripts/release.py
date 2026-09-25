@@ -51,7 +51,23 @@ SIBLINGS = os.path.dirname(REPO)
 DOCS = os.path.join(SIBLINGS, "mnemosyne-docs")
 SITE = os.path.join(SIBLINGS, "mnemosyne-website")
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# MAJOR.MINOR.PATCH with an optional PEP 440 pre-release suffix, so a major
+# can run the beta cycle RELEASING.md requires.
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
+
+PRERELEASE_RE = re.compile(r"^\d+\.\d+\.\d+(?:a|b|rc)\d+$")
+
+
+def _is_prerelease(version: str) -> bool:
+    """True for 4.0.0b1, False for 4.0.0.
+
+    A pre-release ships to PyPI and gets a GitHub pre-release, but it is not
+    the release. It does not take its own dated CHANGELOG section, and it does
+    not move the docs or marketing sites, which advertise the version people
+    get from a plain `pip install`.
+    """
+    return bool(PRERELEASE_RE.match(version))
+
 
 
 # ---------------------------------------------------------------- helpers
@@ -126,6 +142,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     sections = _changelog_sections()
     if version in sections:
         _ok(f"CHANGELOG has a [{version}] section")
+    elif _is_prerelease(version):
+        # Deliberate: a beta shares the entry with the release it precedes.
+        # Promoting per pre-release would leave a stale [4.0.0b1] heading
+        # beside [4.0.0] describing the same changes.
+        _ok(f"CHANGELOG keeps [Unreleased] for pre-release {version}")
     else:
         _bad(f"CHANGELOG has no [{version}] section (found: {', '.join(sections[:4])})")
         problems += 1
@@ -142,7 +163,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     tags = set(_git("tag", "--list").split())
 
     def _parts(v: str) -> tuple:
-        return tuple(int(x) for x in re.findall(r"\d+", v))
+        """Sort key honouring PEP 440 pre-release order.
+
+        A naive digit sweep reads "4.0.0b1" as (4, 0, 0, 1) and ranks it above
+        "4.0.0", which is backwards: a pre-release precedes its final release.
+        """
+        m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?", v.lstrip("v"))
+        if not m:
+            return tuple(int(x) for x in re.findall(r"\d+", v))
+        major, minor, patch, kind, num = m.groups()
+        stage = {None: 3, "a": 0, "b": 1, "rc": 2}[kind]
+        return (int(major), int(minor), int(patch), stage, int(num or 0))
 
     tagged = sorted((_parts(t) for t in tags if VERSION_RE.match(t.lstrip("v"))), reverse=True)
     newest_tag = tagged[0] if tagged else (0,)
@@ -163,10 +194,26 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     gen = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "verify-docs.py")],
                          cwd=REPO, capture_output=True, text=True)
+    out = gen.stdout + gen.stderr
+    # verify-docs.py exits non-zero for canonical drift AND for sibling drift.
+    # Only the first is this repository's problem and only the first should
+    # block a release. Reporting them the same way sent you to run
+    # generate-docs.py for a file this repo does not own, and made a stale
+    # docs site look like stale generated output here.
+    canonical_drift = any(
+        line.strip().startswith("DRIFT:") for line in out.splitlines()
+    )
+    sibling_drift = "DRIFT (sibling)" in out
     if gen.returncode == 0:
         _ok("generated docs match the code")
-    else:
+    elif canonical_drift:
         _bad("generated docs are stale. Run: python3 scripts/generate-docs.py")
+        problems += 1
+    elif sibling_drift:
+        _warn("mnemosyne-docs content is behind this repo; `prepare` for a "
+              "final release regenerates it")
+    else:
+        _bad(f"verify-docs.py failed: {out.strip().splitlines()[-1] if out.strip() else gen.returncode}")
         problems += 1
 
     for name, path, probe in (
@@ -178,8 +225,12 @@ def cmd_check(args: argparse.Namespace) -> int:
         elif os.path.exists(probe):
             cur = _read(probe).strip() if probe.endswith(".txt") and "version" in probe else ""
             if probe.endswith("version.txt"):
-                _ok(f"{name} version.txt = {cur}") if cur == version else _warn(
-                    f"{name} version.txt = {cur}, will become {version} on prepare")
+                if cur == version:
+                    _ok(f"{name} version.txt = {cur}")
+                elif _is_prerelease(version):
+                    _ok(f"{name} version.txt = {cur}, unchanged for a pre-release")
+                else:
+                    _warn(f"{name} version.txt = {cur}, will become {version} on prepare")
             else:
                 _ok(f"{name} present")
 
@@ -266,7 +317,9 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     # 3. Promote [Unreleased] into a dated section.
     cl = os.path.join(REPO, "CHANGELOG.md")
     s = _read(cl)
-    if f"## [{version}]" in s:
+    if _is_prerelease(version):
+        print(f"  CHANGELOG.md left on [Unreleased] ({version} is a pre-release)")
+    elif f"## [{version}]" in s:
         print(f"  CHANGELOG already has [{version}], leaving it alone")
     else:
         s2 = s.replace("## [Unreleased]",
@@ -275,34 +328,53 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         print(f"  CHANGELOG.md -> [{version}] - {today}")
 
     # 4. Regenerate the derived docs so they carry the new version.
-    subprocess.run([sys.executable, os.path.join(REPO, "scripts", "generate-docs.py")],
+    #
+    # For a pre-release use verify-docs.py --fix, which writes only this
+    # repository's canonical docs/api/*.mdx. generate-docs.py also writes into
+    # mnemosyne-docs, and those files carry the version in their frontmatter,
+    # so running it here would put a beta version on the published docs site
+    # even though step 5 deliberately leaves version.txt alone.
+    doc_script = "verify-docs.py" if _is_prerelease(version) else "generate-docs.py"
+    doc_args = ["--fix"] if _is_prerelease(version) else []
+    subprocess.run([sys.executable, os.path.join(REPO, "scripts", doc_script), *doc_args],
                    cwd=REPO, check=False)
 
-    # 5. Sibling repos.
-    vt = os.path.join(DOCS, "version.txt")
-    if os.path.isfile(vt):
-        _write(vt, version + "\n")
-        print(f"  mnemosyne-docs/version.txt -> {version}")
+    # 5. Sibling repos. A pre-release must not move them: the docs hero and
+    # the marketing site advertise what a plain `pip install` gives you, and
+    # that is still the previous release until the final ships.
+    if _is_prerelease(version):
+        print(f"  sibling repos left alone ({version} is a pre-release)")
     else:
-        print("  mnemosyne-docs not present, skipped")
+        vt = os.path.join(DOCS, "version.txt")
+        if os.path.isfile(vt):
+            _write(vt, version + "\n")
+            print(f"  mnemosyne-docs/version.txt -> {version}")
+        else:
+            print("  mnemosyne-docs not present, skipped")
 
-    llms = os.path.join(SITE, "public", "llms.txt")
-    if os.path.isfile(llms):
-        s = _read(llms)
-        s2 = re.sub(r"(Latest stable: mnemosyne-memory )\S+", rf"\g<1>{version}", s)
-        if s2 != s:
-            _write(llms, s2)
-            print(f"  mnemosyne-website/public/llms.txt -> {version}")
-    else:
-        print("  mnemosyne-website not present, skipped")
+        llms = os.path.join(SITE, "public", "llms.txt")
+        if os.path.isfile(llms):
+            s = _read(llms)
+            s2 = re.sub(r"(Latest stable: mnemosyne-memory )\S+", rf"\g<1>{version}", s)
+            if s2 != s:
+                _write(llms, s2)
+                print(f"  mnemosyne-website/public/llms.txt -> {version}")
+        else:
+            print("  mnemosyne-website not present, skipped")
 
     print()
     print("Next:")
-    print(f"  1. review the diffs in all three repos")
-    print(f"  2. python3 scripts/release.py announce {version}")
-    print(f"  3. commit and merge each repo")
-    print(f"  4. python3 scripts/release.py check {version}")
-    print(f"  5. python3 scripts/release.py tag {version}")
+    if _is_prerelease(version):
+        print("  1. review the diff in this repo")
+        print(f"  2. commit and merge, then: python3 scripts/release.py check {version}")
+        print(f"  3. python3 scripts/release.py tag {version}")
+        print("  4. announce nothing yet; a pre-release is not the release")
+    else:
+        print("  1. review the diffs in all three repos")
+        print(f"  2. python3 scripts/release.py announce {version}")
+        print("  3. commit and merge each repo")
+        print(f"  4. python3 scripts/release.py check {version}")
+        print(f"  5. python3 scripts/release.py tag {version}")
     return 0
 
 
@@ -351,9 +423,20 @@ def cmd_announce(args: argparse.Namespace) -> int:
 
     bullets = "\n".join(f"- {i}" for i in items) or "- (fill in the headline changes)"
 
+    # The website has no mdx-components.tsx, so plain markdown elements get
+    # no styling at all: a post written with `##` and `-` renders as bare
+    # unstyled HTML. Every existing post hand-writes JSX with Tailwind
+    # classes, so the scaffold has to as well. This was learned the hard way.
+    P = 'className="font-serif-alt text-lg leading-relaxed text-charcoal mb-6"'
+    H2 = 'className="font-serif text-2xl lg:text-3xl text-charcoal mt-12 mb-4"'
+    UL = 'className="font-serif-alt text-lg leading-relaxed text-charcoal mb-6 ml-6 list-disc"'
+
+    li = "\n".join(f'  <li className="mb-2">{i}</li>' for i in items) or \
+         '  <li className="mb-2">TODO the headline changes</li>'
+
     blog = f"""---
 title: "Mnemosyne {version}"
-excerpt: "TODO one or two sentences. What changed and why a user should care."
+excerpt: "TODO one or two sentences. What changed and why a reader should care."
 date: "{today}"
 readTime: "4 min read"
 category: "Release"
@@ -362,27 +445,41 @@ featured: false
 image: "/hero-demo.jpg"
 ---
 
-<p className="font-serif-alt text-lg leading-relaxed text-charcoal mb-6">
+<p {P}>
   TODO: open with the one thing that matters most in this release.
 </p>
 
-## What changed
+<h2 {H2}>
+  What changed
+</h2>
 
-{bullets}
+<ul {UL}>
+{li}
+</ul>
 
-## Upgrading
+<h2 {H2}>
+  Upgrading
+</h2>
+
+<p {P}>
+  Run
+  <code className="text-accent-terracotta bg-cream-dark px-1 rounded">pip install --upgrade 'mnemosyne-memory[embeddings]'</code>.
+  TODO note any migration or config change, or say there is none.
+</p>
 
 <CodeBlock code={{`pip install --upgrade 'mnemosyne-memory[embeddings]'`}} language="bash" />
 
-Full notes: https://github.com/mnemosyne-oss/mnemosyne/releases/tag/v{version}
+<p {P}>
+  Full notes on the
+  <a href="https://github.com/mnemosyne-oss/mnemosyne/releases/tag/v{version}" className="text-accent-terracotta underline underline-offset-2 hover:text-charcoal">v{version} release page</a>.
+</p>
 """
 
     # X has a 280 character budget, so build the shortest honest version and
-    # let the caller expand it. Two items, trimmed, no install line: the link
-    # carries that. A draft that already fits is likelier to get posted than
-    # one the author has to cut down first.
+    # let the author expand it. Two items, trimmed. A draft that already fits
+    # is likelier to get posted than one that must be cut down first.
     def _short(s: str, n: int = 78) -> str:
-        return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+        return s if len(s) <= n else s[: n - 1].rstrip() + "\u2026"
 
     x_lines = "\n".join(f"- {_short(i)}" for i in items[:2])
     x_post = f"""Mnemosyne {version} is out.
@@ -410,7 +507,7 @@ Full changelog: <https://github.com/mnemosyne-oss/mnemosyne/releases/tag/v{versi
 
     print(f"Drafts written to dist-announce/ for {version}:\n")
     print(f"  {slug}.mdx          blog post -> mnemosyne-website/content/blog/")
-    print(f"                          verified to build; renders one page per locale (7)")
+    print("                          verified to build; renders one page per locale (7)")
     print(f"  {slug}-x.txt        X post ({len(x_post)} chars)")
     print(f"  {slug}-discord.md   Discord announcement")
     print()
@@ -439,7 +536,7 @@ def cmd_tag(args: argparse.Namespace) -> int:
     print()
     print("Then, once PyPI shows the new version:")
     print("    merge the version bumps in mnemosyne-docs and mnemosyne-website")
-    print(f"    publish the drafts from dist-announce/")
+    print("    publish the drafts from dist-announce/")
     return 0
 
 

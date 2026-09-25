@@ -20,6 +20,7 @@ Local-first, zero-cloud memory for AI agents. SQLite-backed. Sub-millisecond. Fu
 | [Security & Privacy](security.md) | Threat model, encryption internals, BYOK comparison |
 | [Benchmarking](benchmarking.md) | Maintainer guide: per-tool A/B benchmark env vars, diagnostics, pure-recall mode, test sequence template |
 | [Benchmark Results Analysis](benchmark-results-analysis.md) | Output-file schemas + analysis recipes (per-ability scores, paired bootstrap CIs, voice attribution). AI-assistant-friendly reference |
+| [Migrating to 4.0](migration-4.0.md) | The single breaking change in 4.0, who it affects, and the reindex path for stores created under the old silent-384 fallback |
 | [Changelog](changelog.md) | Pointer to the root `CHANGELOG.md`, plus release-state notes |
 
 ## Generated references
@@ -39,7 +40,7 @@ generator instead.
 |---|---|
 | [Memory Hygiene](hygiene.md) | Noise scoring, the audit and clean workflow, secret detection, and how to prevent noise being stored |
 | [Configuration Profiles](profiles.md) | The eight built-in profiles, what distinguishes them, validation rules, and the `vec_type` restart trap |
-| [L3 Persona Tier](persona.md) | Always-injected behavioural facts. Includes an explicit list of what is not yet wired |
+| [L3 Persona Tier](persona.md) | Durable behavioural facts promoted into a store; prompt injection reads an opt-in `persona.md` file. Includes an explicit list of what is not yet wired |
 | [SHMR](shmr.md) | Self-harmonizing memory reasoning. Library only; nothing calls it yet |
 
 ## Reference and analysis
