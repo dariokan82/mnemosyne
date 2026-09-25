@@ -1,0 +1,72 @@
+# Mnemosyne on lucciola (Mac mini, Debian 13): production from 2026-09-25.
+#
+# Adapted from docker-compose.yml (the Trevor stack). Read that file for why
+# each env var is set the way it is; only what differs is explained here.
+#
+# Run from the repo root:
+#   docker compose -p mnemosyne --env-file /srv/mnemosyne/.env \
+#     -f deploy/lucciola/docker-compose.yml up -d --build
+#
+# /srv/mnemosyne/.env (mode 600, never in git) holds API_TOKEN,
+# ANTHROPIC_API_KEY and MNEMOSYNE_MCP_PUBLIC_URL, COPIED from Portainer
+# stack 96. Never regenerate them: every client already holds that token,
+# and the OAuth shim hands the same token to claude.ai.
+#
+# Data lives at /srv/mnemosyne/data on the SSD. Banks MUST sit at
+# data/banks/<name>/mnemosyne.db. A flat banks__<name>__mnemosyne.db (the
+# Phase 0 snapshot layout) is silently ignored, and an empty bank is
+# created in its place.
+#
+# Backups: deploy/lucciola/backup.sh, run nightly by the systemd timer
+# mnemosyne-backup.timer.
+
+services:
+  mnemosyne-mcp:
+    build: ../..
+    image: mnemosyne-mcp:lucciola
+    container_name: mnemosyne-mcp
+    restart: unless-stopped
+    ports:
+      - "8181:8181"
+    volumes:
+      - /srv/mnemosyne/data:/data
+    environment:
+      - MNEMOSYNE_DATA_DIR=/data
+      - MNEMOSYNE_VEC_TYPE=int8
+      - MNEMOSYNE_LLM_ENABLED=false
+      - MNEMOSYNE_MCP_TOKEN=${API_TOKEN:?API_TOKEN must be set in /srv/mnemosyne/.env}
+      - MNEMOSYNE_MCP_PUBLIC_URL=${MNEMOSYNE_MCP_PUBLIC_URL:?}
+      - MNEMOSYNE_DEFAULT_EXTRACT_ENTITIES=true
+      - PUID=1000
+      - PGID=1000
+    command: ["--transport", "sse", "--host", "0.0.0.0", "--port", "8181"]
+    # Same socket probe as Trevor: upstream's image healthcheck cold-loads the
+    # embedding model with a 5 s timeout and paints the container unhealthy.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket,sys; s=socket.create_connection(('127.0.0.1',8181),3); s.close()"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  mnemosyne-sleep:
+    image: mnemosyne-mcp:lucciola
+    container_name: mnemosyne-sleep
+    restart: unless-stopped
+    depends_on: [mnemosyne-mcp]
+    volumes:
+      - /srv/mnemosyne/data:/data
+    environment:
+      - MNEMOSYNE_DATA_DIR=/data
+      - MNEMOSYNE_VEC_TYPE=int8
+      - MNEMOSYNE_SLEEP_INTERVAL_SECONDS=21600
+      - MNEMOSYNE_LLM_ENABLED=true
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?}
+      - MNEMOSYNE_HOST_LLM_MODEL=claude-opus-5
+      - MNEMOSYNE_HOST_LLM_TIMEOUT=120
+      - PUID=1000
+      - PGID=1000
+    command: ["sleep-loop"]
+    healthcheck:
+      disable: true

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the mnemosyne backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
