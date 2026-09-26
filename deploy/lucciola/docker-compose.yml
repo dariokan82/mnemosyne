@@ -71,3 +71,20 @@ services:
     command: ["sleep-loop"]
     healthcheck:
       disable: true
+
+  # Public entrance for mnemosyne.belmont.lol that does not depend on Trevor
+  # (2026-09-26). Its own remotely-managed tunnel "lucciola"
+  # (35a51c2c-bdb1-4905-a173-1752dd69309a) with ONE route,
+  # mnemosyne.belmont.lol -> http://127.0.0.1:8181. Deliberately NOT a
+  # replica of Trevor's "synohome" tunnel: every other route there points at
+  # localhost on Trevor, and a replica here would answer for them with empty
+  # ports. Host networking resolves DNS through the host (MagicDNS works
+  # there) and reaches 127.0.0.1:8181.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mnemosyne-cloudflared
+    restart: unless-stopped
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?TUNNEL_TOKEN must be set in /srv/mnemosyne/.env}
