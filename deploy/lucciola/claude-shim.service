@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-shim: Anthropic Messages API answered by headless Claude Code (mnemosyne sleep)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dario
+EnvironmentFile=/srv/mnemosyne/.env
+Environment=PATH=/home/dario/.local/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=ANTHROPIC_API_KEY API_TOKEN TUNNEL_TOKEN MNEMOSYNE_MCP_PUBLIC_URL
+ExecStart=/usr/bin/python3 -u /home/dario/src/mnemosyne/deploy/lucciola/claude_shim.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

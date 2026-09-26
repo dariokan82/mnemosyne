@@ -63,11 +63,18 @@ services:
       - MNEMOSYNE_VEC_TYPE=int8
       - MNEMOSYNE_SLEEP_INTERVAL_SECONDS=21600
       - MNEMOSYNE_LLM_ENABLED=true
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?}
+      # Consolidation runs on D's Claude subscription, not the API (2026-09-26):
+      # the SDK talks to claude-shim on the host (deploy/lucciola/claude_shim.py),
+      # which answers with headless `claude -p`. The "key" is the shim's token.
+      # Rollback: ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?} and drop the BASE_URL.
+      - ANTHROPIC_API_KEY=${CLAUDE_SHIM_TOKEN:?}
+      - ANTHROPIC_BASE_URL=http://host.docker.internal:8765
       - MNEMOSYNE_HOST_LLM_MODEL=claude-opus-5
       - MNEMOSYNE_HOST_LLM_TIMEOUT=120
       - PUID=1000
       - PGID=1000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["sleep-loop"]
     healthcheck:
       disable: true
